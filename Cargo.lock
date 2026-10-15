@@ -9405,6 +9405,7 @@ dependencies = [
  "photocraft-compose",
  "photocraft-doc",
  "photocraft-engine",
+ "photocraft-format",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

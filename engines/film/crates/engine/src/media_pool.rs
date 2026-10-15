@@ -155,6 +155,11 @@ impl MediaPool {
         *self.nested.write().unwrap_or_else(|e| e.into_inner()) = Some(r);
     }
 
+    /// Studio: the installed resolver, to carry over to a fresh pool (opening a project).
+    pub fn nested_resolver(&self) -> Option<NestedResolver> {
+        self.nested.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     /// Studio: the live source of a `studio://` reference, if a resolver knows it.
     pub fn resolve_nested(&self, path: &str) -> Option<SharedSource> {
         if !path.starts_with(NESTED_SCHEME) {

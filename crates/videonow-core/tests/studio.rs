@@ -120,3 +120,52 @@ fn every_command_has_an_effect_class() {
     }
     assert!(list.iter().all(|c| c["effect"].is_string()));
 }
+
+fn tmpdir(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("videonow-test-{name}-{}.videonow", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    d
+}
+
+/// Phase 1 gate: a saved project opens to the same picture, and stays live after opening.
+#[test]
+fn save_and_open_round_trip_renders_the_same() {
+    let (mut s, img, _) = nested_project();
+    ok(&mut s, "image:shape.create", json!({"asset": img, "kind": "ellipse", "rect": [8, 8, 48, 48], "fill": "#2266cc"}));
+    let before = s.render_rgba(0.5, 1.0).unwrap();
+    let dir = tmpdir("roundtrip");
+    let r = ok(&mut s, "studio:project.save", json!({"path": dir.to_string_lossy()}));
+    assert_eq!(r["receipt"]["command"], "studio:project.save");
+    for f in ["manifest.json", "timeline.fcproj", "motion.ecproj", "images/1.pcraft"] {
+        assert!(dir.join(f).is_file(), "{f} missing");
+    }
+
+    let mut t = Studio::new();
+    let r = ok(&mut t, "studio:project.open", json!({"path": dir.to_string_lossy()}));
+    assert_eq!(r["result"]["assets"], 2);
+    let after = t.render_rgba(0.5, 1.0).unwrap();
+    assert_eq!((before.0, before.1), (after.0, after.1));
+    assert!(after.3.is_empty(), "offline after open: {:?}", after.3);
+    assert!(before.2 == after.2, "the reopened project renders differently");
+
+    // still live: an image edit after opening reaches the timeline
+    ok(&mut t, "image:shape.create", json!({"asset": img, "kind": "rect", "rect": [24, 24, 16, 16], "fill": "#ff0000"}));
+    let c = center(&t);
+    assert!(c[0] > 200 && c[1] < 60, "{c:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn open_refuses_what_is_not_a_project() {
+    let mut s = Studio::new();
+    let dir = tmpdir("notproject");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("manifest.json"), br#"{"format":"other","schema":1}"#).unwrap();
+    assert!(s.execute("studio:project.open", json!({"path": dir.to_string_lossy()})).is_err());
+    // and saving into a folder with other files is refused
+    std::fs::write(dir.join("notes.txt"), b"x").unwrap();
+    std::fs::remove_file(dir.join("manifest.json")).unwrap();
+    let e = s.execute("studio:project.save", json!({"path": dir.to_string_lossy()})).unwrap_err().to_string();
+    assert!(e.contains("not empty"), "{e}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

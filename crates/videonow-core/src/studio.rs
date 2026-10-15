@@ -22,20 +22,22 @@ pub struct Studio {
     /// EffectCraft: every composition of the project.
     pub motion: effectcraft_engine::Session,
     /// PhotoCraft: one session per image document.
-    images: BTreeMap<AssetId, photocraft_engine::Session>,
-    assets: BTreeMap<AssetId, Asset>,
-    next_asset: u64,
-    shared_motion: SharedMotion,
-    shared_images: SharedImages,
+    pub(crate) images: BTreeMap<AssetId, photocraft_engine::Session>,
+    pub(crate) assets: BTreeMap<AssetId, Asset>,
+    pub(crate) next_asset: u64,
+    pub(crate) shared_motion: SharedMotion,
+    pub(crate) shared_images: SharedImages,
     /// The asset table as the timeline's nested-source resolver sees it.
-    registry: Arc<RwLock<HashMap<AssetId, Asset>>>,
-    footage: Arc<dyn FootageSource>,
+    pub(crate) registry: Arc<RwLock<HashMap<AssetId, Asset>>>,
+    pub(crate) footage: Arc<dyn FootageSource>,
     /// The latest snapshot number, shared with the sources (see [`Generation`]).
-    generation: Generation,
-    revision: u64,
-    journal: Vec<Value>,
+    pub(crate) generation: Generation,
+    pub(crate) revision: u64,
+    pub(crate) journal: Vec<Value>,
     /// What each change touched, newest last (for `studio:undo`).
-    undo: Vec<Vec<String>>,
+    pub(crate) undo: Vec<Vec<String>>,
+    /// Where the project was last saved or opened from.
+    pub(crate) project_path: Option<std::path::PathBuf>,
 }
 
 impl Default for Studio {
@@ -100,6 +102,7 @@ impl Studio {
             revision: 0,
             journal: Vec::new(),
             undo: Vec::new(),
+            project_path: None,
         }
     }
 
@@ -113,6 +116,11 @@ impl Studio {
 
     pub fn image_session(&self, id: AssetId) -> Option<&photocraft_engine::Session> {
         self.images.get(&id)
+    }
+
+    /// Where the project was last saved or opened from.
+    pub fn project_path(&self) -> Option<&std::path::Path> {
+        self.project_path.as_deref()
     }
 
     /// Run any command: `timeline:<id>`, `motion:<id>`, `image:<id>` or `studio:<id>`.
@@ -154,6 +162,10 @@ impl Studio {
         self.publish();
         let after = self.marks();
         receipt.changed = Self::changed(&before, &after);
+        if domain == "studio" && cmd == "project.save" {
+            // saving rewrites the engines' file metadata (path, saved time), not the work itself
+            receipt.changed.clear();
+        }
         if !receipt.changed.is_empty() {
             self.revision += 1;
         }
@@ -167,8 +179,12 @@ impl Studio {
         if receipt.changed.iter().any(|c| c != "studio") {
             receipt.not_checked = NOT_CHECKED_VISUAL.to_vec();
         }
-        if !receipt.changed.is_empty() && cmd != "undo" {
+        // undo replays engine histories; replacing the whole project is not undoable
+        let undoable = !(domain == "studio" && matches!(cmd, "undo" | "project.open" | "project.new" | "project.save"));
+        if !receipt.changed.is_empty() && undoable {
             self.undo.push(receipt.changed.clone());
+        }
+        if !receipt.changed.is_empty() {
             self.journal.push(json!({"command": id, "params": original, "receipt": receipt}));
         }
         Ok(json!({"result": result, "receipt": receipt}))
@@ -203,7 +219,7 @@ impl Studio {
     }
 
     /// Make every engine's latest document visible to the renders of the others.
-    fn publish(&mut self) {
+    pub(crate) fn publish(&mut self) {
         let mut seq = self.generation.load(std::sync::atomic::Ordering::Acquire);
         {
             let cur = read(&self.shared_motion);
@@ -227,7 +243,7 @@ impl Studio {
         *self.registry.write().unwrap_or_else(|e| e.into_inner()) = self.assets.iter().map(|(k, v)| (*k, v.clone())).collect();
     }
 
-    fn add_asset(&mut self, kind: AssetKind, name: &str, comp: Option<u64>) -> AssetId {
+    pub(crate) fn add_asset(&mut self, kind: AssetKind, name: &str, comp: Option<u64>) -> AssetId {
         let id = AssetId(self.next_asset);
         self.next_asset += 1;
         self.assets.insert(id, Asset { id, kind, name: name.to_string(), comp, timeline_item: None, motion_footage: None });
@@ -415,6 +431,27 @@ impl Studio {
                     receipt.warnings.push(format!("{} is offline ({}); the frame shows its slate", o.name, o.status));
                 }
                 Ok(json!({"path": path, "width": w, "height": h, "seconds": sec, "offline": offline}))
+            }
+            "project.save" => {
+                let path = match str_p("path") {
+                    Some(p) => crate::project::project_dir(p),
+                    None => self.project_path.clone().ok_or_else(|| bad(&full, "`path` is needed for a project that was never saved"))?,
+                };
+                self.save_project(&path)
+            }
+            "project.open" => {
+                let path = str_p("path").ok_or_else(|| bad(&full, "`path` must be a .videonow folder"))?;
+                let r = self.open_project(std::path::Path::new(path))?;
+                receipt.warnings.push("undo history starts over after opening a project".into());
+                Ok(r)
+            }
+            "project.new" => {
+                let journal = std::mem::take(&mut self.journal);
+                let revision = self.revision;
+                *self = Studio::new();
+                self.journal = journal;
+                self.revision = revision;
+                Ok(json!({"new": true}))
             }
             "undo" => {
                 let Some(last) = self.undo.pop() else { return Err(StudioError::Other("nothing to undo".into())) };

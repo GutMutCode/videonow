@@ -18,6 +18,7 @@
 pub mod assets;
 pub mod bridge;
 pub mod manifest;
+pub mod project;
 pub mod receipt;
 mod studio;
 

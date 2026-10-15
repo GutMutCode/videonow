@@ -154,6 +154,16 @@ fn demo(out: &Path) -> i32 {
         // 5. edit the badge in the image engine: the next frame shows it through comp and timeline
         step(&mut s, "image:shape.create", json!({"asset": badge, "kind": "rect", "rect": [240, 280, 160, 80], "fill": "#e4572e"}))?;
         step(&mut s, "studio:render.frame", json!({"seconds": 2.5, "path": png("frame-2.5s-after-badge-edit.png"), "scale": 0.5}))?;
+        // 6. save the whole project, open it again, and check the picture is the same
+        let project = out.join("demo.videonow").to_string_lossy().into_owned();
+        step(&mut s, "studio:project.save", json!({"path": project}))?;
+        let before = s.render_rgba(2.5, 0.5).map_err(|e| e.to_string())?;
+        step(&mut s, "studio:project.open", json!({"path": project}))?;
+        let after = s.render_rgba(2.5, 0.5).map_err(|e| e.to_string())?;
+        if before.2 != after.2 {
+            return Err("the reopened project renders differently".into());
+        }
+        println!("{:<28} reopened project renders the same frame", "check");
         let inspect = step(&mut s, "studio:inspect", json!({}))?;
         let journal = s.execute("studio:journal", json!({})).map_err(|e| e.to_string())?;
         let write = |name: &str, v: &Value| std::fs::write(out.join(name), serde_json::to_string_pretty(v).unwrap_or_default()).map_err(|e| e.to_string());

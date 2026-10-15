@@ -4383,8 +4383,13 @@ fn schema_backup_path(path: &str, schema: u32) -> String {
 /// Make `proj` the session's project (fresh history, media pool and editor state).
 fn install_project(s: &mut Session, proj: filmcraft_project::Project, path: Option<String>, clean: bool) {
     let proxies = s.media.use_proxies();
+    // Studio: compositions and images of the same project keep resolving in the new pool
+    let nested = s.media.nested_resolver();
     s.media = std::sync::Arc::new(crate::MediaPool::default());
     s.media.set_use_proxies(proxies);
+    if let Some(r) = nested {
+        s.media.set_nested_resolver(r);
+    }
     s.offline = Default::default();
     let first = proj.sequences().next().map(|i| i.id);
     s.project = std::sync::Arc::new(proj);

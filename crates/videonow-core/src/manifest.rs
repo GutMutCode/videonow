@@ -106,6 +106,21 @@ pub const STUDIO_COMMANDS: &[StudioCommand] = &[
         keys: &["seconds", "path", "scale"],
         summary: "Render the active sequence at a time to a PNG; reports offline media it drew a slate for.",
     },
+    StudioCommand {
+        id: "project.save",
+        effect: Effect::FileWrite,
+        params: r#"{"path":str? (a .videonow folder; default: where it was last saved)}"#,
+        keys: &["path"],
+        summary: "Save the whole project (timeline, compositions, images, assets) as a .videonow folder.",
+    },
+    StudioCommand {
+        id: "project.open",
+        effect: Effect::Destructive,
+        params: r#"{"path":str (a .videonow folder)}"#,
+        keys: &["path"],
+        summary: "Replace the open project with a saved one (unsaved changes are lost; undo history starts over).",
+    },
+    StudioCommand { id: "project.new", effect: Effect::Destructive, params: "{}", keys: &[], summary: "Start an empty project (unsaved changes are lost)." },
     StudioCommand { id: "undo", effect: Effect::Edit, params: "{}", keys: &[], summary: "Undo the last change, in whichever engine made it." },
 ];
 

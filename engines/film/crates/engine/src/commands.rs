@@ -682,6 +682,37 @@ fn detect_image_sequence(s: &Session, path: &str) -> bool {
     filmcraft_media::sequence::Numbered::parse(path).is_some() && crate::media_pool::image_sequence_frames(path, &*s.services).is_ok_and(|f| f.len() > 1)
 }
 
+/// Studio: add an item whose pixels come from another engine of the same project (a composition
+/// or an image document), referenced as `studio://<kind>/<asset>` and rendered live by `src`.
+pub fn import_nested(s: &mut Session, uri: &str, name: &str, src: filmcraft_media::SharedSource, bin: Option<filmcraft_project::BinId>) -> Result<ItemId> {
+    if !uri.starts_with(crate::media_pool::NESTED_SCHEME) {
+        return Err(EngineError::Other(format!("{uri}: not a {} reference", crate::media_pool::NESTED_SCHEME)));
+    }
+    let info = src.info().clone();
+    let label = s.prefs.labels.for_media(info.kind, info.has_video(), info.has_audio());
+    let (uri_s, name_s) = (uri.to_string(), name.to_string());
+    let id = s.edit(&format!("Add {name}"), |p, _| {
+        Ok(p.add_item(
+            &name_s,
+            label,
+            ItemKind::Media(MediaClip {
+                media: MediaRef::File { path: uri_s },
+                info,
+                interpret: Default::default(),
+                mark_in: None,
+                mark_out: None,
+                markers: vec![],
+                offline: false,
+                proxy: None,
+                identity: None,
+            }),
+            bin,
+        ))
+    })?;
+    s.media.insert_keyed(id, format!("file:{uri}"), src);
+    Ok(id)
+}
+
 fn import_source(
     s: &mut Session,
     path: &str,

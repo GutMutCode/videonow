@@ -53,7 +53,17 @@ pub struct MediaPool {
     failures: Arc<Mutex<HashMap<ItemId, u32>>>,
     /// Openers tried before the built-in ones (MP4/MOV + codecs register here).
     pub openers: RwLock<Vec<Opener>>,
+    /// Studio: resolves `studio://…` references (a composition or an image document of the same
+    /// project) to a live source rendered by the engine that owns it.
+    nested: RwLock<Option<NestedResolver>>,
 }
+
+/// Studio: turns a `studio://<kind>/<asset>` reference into a source rendered by another engine
+/// of the same project (`None` = no such asset).
+pub type NestedResolver = Arc<dyn Fn(&str) -> Option<SharedSource> + Send + Sync>;
+
+/// Studio: the URI scheme of a reference to a composition or image document of the same project.
+pub const NESTED_SCHEME: &str = "studio://";
 
 impl Default for MediaPool {
     /// A pool with the built-in container/codec openers registered.
@@ -65,6 +75,7 @@ impl Default for MediaPool {
             use_proxies: AtomicBool::new(false),
             failures: Arc::default(),
             openers: RwLock::new(filmcraft_codecs::openers()),
+            nested: RwLock::new(None),
         }
     }
 }
@@ -139,6 +150,20 @@ fn file_name(path: &str) -> String {
 }
 
 impl MediaPool {
+    /// Studio: install the resolver for `studio://` references (see [`NestedResolver`]).
+    pub fn set_nested_resolver(&self, r: NestedResolver) {
+        *self.nested.write().unwrap_or_else(|e| e.into_inner()) = Some(r);
+    }
+
+    /// Studio: the live source of a `studio://` reference, if a resolver knows it.
+    pub fn resolve_nested(&self, path: &str) -> Option<SharedSource> {
+        if !path.starts_with(NESTED_SCHEME) {
+            return None;
+        }
+        let r = self.nested.read().unwrap_or_else(|e| e.into_inner()).clone()?;
+        r(path)
+    }
+
     pub fn register_opener(&self, o: Opener) {
         self.openers.write().unwrap_or_else(|e| e.into_inner()).push(o);
     }
@@ -268,6 +293,14 @@ impl MediaPool {
             && (k.is_empty() || *k == key)
         {
             return Some(s.clone());
+        }
+        // Studio: a composition or image document of the same project renders live
+        if let MediaRef::File { path } = &m.media
+            && let Some(src) = self.resolve_nested(path)
+        {
+            self.offline.write().unwrap_or_else(|e| e.into_inner()).remove(&item);
+            self.sources.write().unwrap_or_else(|e| e.into_inner()).insert(item, (key, src.clone()));
+            return Some(src);
         }
         let src: SharedSource = match &m.media {
             MediaRef::Generator(g) => {

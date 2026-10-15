@@ -1,0 +1,21 @@
+[package]
+name = "videonow-automation"
+description = "MCP server over the studio: one tool set for the timeline, compositions and images"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+videonow-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+rmcp = { version = "3.5", default-features = false, features = ["server", "macros", "transport-io"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync", "io-util"] }
+base64 = "0.22"
+schemars = "1"
+image = { workspace = true }
+
+[lints]
+workspace = true

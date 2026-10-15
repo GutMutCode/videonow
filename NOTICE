@@ -1,0 +1,23 @@
+VideoNow
+Copyright (c) 2026 the VideoNow contributors.
+Licensed under the MIT License or the Apache License, Version 2.0, at your option
+(LICENSE-MIT, LICENSE-APACHE).
+
+This product is built on three open-source applications, copied once into engines/ and developed
+here independently from then on:
+
+  engines/film    FilmCraft    https://github.com/storytold/filmcraft    (commit in engines/UPSTREAM.txt)
+  engines/effect  EffectCraft  https://github.com/storytold/effectcraft  (commit in engines/UPSTREAM.txt)
+  engines/photo   PhotoCraft   https://github.com/storytold/photocraft   (commit in engines/UPSTREAM.txt)
+
+Each is Copyright (c) 2026 ArtCraft Team and its contributors, licensed under the MIT License or
+the Apache License, Version 2.0, at your option. Their own NOTICE, LICENSE-MIT, LICENSE-APACHE and
+ATTRIBUTION.md files are kept unchanged in their directories; third-party material they bundle is
+listed there under its own licences.
+
+The ArtCraft name, wordmark and logos are trademarks of the ArtCraft Team and are not open source.
+VideoNow does not use them: the brand files (docs/brand/) were removed from the copied
+applications, and the user-interface code that referred to them is to be rebranded before any UI
+ships (see the design document, "UI").
+
+Changes made to the copied code are recorded in the git history of this repository.

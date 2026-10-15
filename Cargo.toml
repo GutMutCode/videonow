@@ -1,0 +1,259 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*", "engines/film/crates/*", "engines/effect/crates/*", "engines/photo/crates/*"]
+default-members = ["crates/*", "apps/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.95"
+repository = "https://github.com/GutMutCode/videonow"
+
+[workspace.dependencies]
+# videonow
+videonow-core = { path = "crates/videonow-core" }
+videonow-automation = { path = "crates/videonow-automation" }
+# engines (vendored once, developed here from now on)
+effectcraft-automation = { path = "engines/effect/crates/automation" }
+effectcraft-av1enc = { path = "engines/effect/crates/av1enc" }
+effectcraft-color = { path = "engines/effect/crates/color" }
+effectcraft-effects = { path = "engines/effect/crates/effects" }
+effectcraft-engine = { path = "engines/effect/crates/engine" }
+effectcraft-export = { path = "engines/effect/crates/export" }
+effectcraft-expr = { path = "engines/effect/crates/expr" }
+effectcraft-geom = { path = "engines/effect/crates/geom" }
+effectcraft-gpu = { path = "engines/effect/crates/gpu" }
+effectcraft-hevcenc = { path = "engines/effect/crates/hevcenc" }
+effectcraft-host = { path = "engines/effect/crates/host" }
+effectcraft-interchange = { path = "engines/effect/crates/interchange" }
+effectcraft-keyframe = { path = "engines/effect/crates/keyframe" }
+effectcraft-lottie = { path = "engines/effect/crates/lottie" }
+effectcraft-media = { path = "engines/effect/crates/media" }
+effectcraft-model = { path = "engines/effect/crates/model" }
+effectcraft-opusenc = { path = "engines/effect/crates/opusenc" }
+effectcraft-path = { path = "engines/effect/crates/path" }
+effectcraft-pdf = { path = "engines/effect/crates/pdf" }
+effectcraft-plugin = { path = "engines/effect/crates/plugin" }
+effectcraft-project = { path = "engines/effect/crates/project" }
+effectcraft-psd = { path = "engines/effect/crates/psd" }
+effectcraft-raster = { path = "engines/effect/crates/raster" }
+effectcraft-render = { path = "engines/effect/crates/render" }
+effectcraft-script = { path = "engines/effect/crates/script" }
+effectcraft-segment = { path = "engines/effect/crates/segment" }
+effectcraft-svg = { path = "engines/effect/crates/svg" }
+effectcraft-text = { path = "engines/effect/crates/text" }
+effectcraft-time = { path = "engines/effect/crates/time" }
+effectcraft-track = { path = "engines/effect/crates/track" }
+effectcraft-ui-egui = { path = "engines/effect/crates/ui-egui" }
+effectcraft-vp9enc = { path = "engines/effect/crates/vp9enc" }
+filmcraft-aac = { path = "engines/film/crates/aac" }
+filmcraft-ac3 = { path = "engines/film/crates/ac3" }
+filmcraft-apv = { path = "engines/film/crates/apv" }
+filmcraft-audio-dsp = { path = "engines/film/crates/audio-dsp" }
+filmcraft-automation = { path = "engines/film/crates/automation" }
+filmcraft-av1 = { path = "engines/film/crates/av1" }
+filmcraft-avi = { path = "engines/film/crates/avi" }
+filmcraft-bitstream = { path = "engines/film/crates/bitstream" }
+filmcraft-captions = { path = "engines/film/crates/captions" }
+filmcraft-cfb = { path = "engines/film/crates/cfb" }
+filmcraft-codecs = { path = "engines/film/crates/codecs" }
+filmcraft-color = { path = "engines/film/crates/color" }
+filmcraft-dng = { path = "engines/film/crates/dng" }
+filmcraft-dnx = { path = "engines/film/crates/dnx" }
+filmcraft-edit = { path = "engines/film/crates/edit" }
+filmcraft-engine = { path = "engines/film/crates/engine" }
+filmcraft-export = { path = "engines/film/crates/export" }
+filmcraft-flac = { path = "engines/film/crates/flac" }
+filmcraft-format = { path = "engines/film/crates/format" }
+filmcraft-frame = { path = "engines/film/crates/frame" }
+filmcraft-geom = { path = "engines/film/crates/geom" }
+filmcraft-gpu = { path = "engines/film/crates/gpu" }
+filmcraft-h264 = { path = "engines/film/crates/h264" }
+filmcraft-h264enc = { path = "engines/film/crates/h264enc" }
+filmcraft-hevc = { path = "engines/film/crates/hevc" }
+filmcraft-interchange = { path = "engines/film/crates/interchange" }
+filmcraft-isobmff = { path = "engines/film/crates/isobmff" }
+filmcraft-matroska = { path = "engines/film/crates/matroska" }
+filmcraft-media = { path = "engines/film/crates/media" }
+filmcraft-mpa = { path = "engines/film/crates/mpa" }
+filmcraft-mpeg2v = { path = "engines/film/crates/mpeg2v" }
+filmcraft-mpegts = { path = "engines/film/crates/mpegts" }
+filmcraft-mxf = { path = "engines/film/crates/mxf" }
+filmcraft-ogg = { path = "engines/film/crates/ogg" }
+filmcraft-opus = { path = "engines/film/crates/opus" }
+filmcraft-platform = { path = "engines/film/crates/platform" }
+filmcraft-project = { path = "engines/film/crates/project" }
+filmcraft-prores = { path = "engines/film/crates/prores" }
+filmcraft-render = { path = "engines/film/crates/render" }
+filmcraft-scopes = { path = "engines/film/crates/scopes" }
+filmcraft-speech = { path = "engines/film/crates/speech" }
+filmcraft-testkit = { path = "engines/film/crates/testkit" }
+filmcraft-text = { path = "engines/film/crates/text" }
+filmcraft-time = { path = "engines/film/crates/time" }
+filmcraft-tts = { path = "engines/film/crates/tts" }
+filmcraft-tts-text = { path = "engines/film/crates/tts-text" }
+filmcraft-ui-egui = { path = "engines/film/crates/ui-egui" }
+filmcraft-vp8 = { path = "engines/film/crates/vp8" }
+filmcraft-vp9 = { path = "engines/film/crates/vp9" }
+photocraft-affinity = { path = "engines/photo/crates/affinity" }
+photocraft-algo = { path = "engines/photo/crates/algo" }
+photocraft-automation = { path = "engines/photo/crates/automation" }
+photocraft-cms = { path = "engines/photo/crates/cms" }
+photocraft-codecs = { path = "engines/photo/crates/codecs" }
+photocraft-color = { path = "engines/photo/crates/color" }
+photocraft-compose = { path = "engines/photo/crates/compose" }
+photocraft-doc = { path = "engines/photo/crates/doc" }
+photocraft-engine = { path = "engines/photo/crates/engine" }
+photocraft-format = { path = "engines/photo/crates/format" }
+photocraft-geom = { path = "engines/photo/crates/geom" }
+photocraft-gpu = { path = "engines/photo/crates/gpu" }
+photocraft-io = { path = "engines/photo/crates/io" }
+photocraft-ops = { path = "engines/photo/crates/ops" }
+photocraft-paint = { path = "engines/photo/crates/paint" }
+photocraft-plugins = { path = "engines/photo/crates/plugins" }
+photocraft-psd = { path = "engines/photo/crates/psd" }
+photocraft-raster = { path = "engines/photo/crates/raster" }
+photocraft-raw = { path = "engines/photo/crates/raw" }
+photocraft-tablet = { path = "engines/photo/crates/tablet" }
+photocraft-testkit = { path = "engines/photo/crates/testkit" }
+photocraft-text = { path = "engines/photo/crates/text" }
+photocraft-ui-egui = { path = "engines/photo/crates/ui-egui" }
+photocraft-vector = { path = "engines/photo/crates/vector" }
+# external
+arc-swap = "1"
+boa_engine = { version = "0.22", default-features = false }
+bytemuck = { version = "1", features = ["derive"] }
+cpal = "0.16"
+craft-print = { git = "https://github.com/storytold/craft-libs", rev = "3d37da389a3618ab9b76109da11416e9ca4ea719" }
+craft-ui = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5c874d51eeb3de70e735c8ce87a59a7dedd47675", features = ["serde"] }
+criterion = { version = "0.5", default-features = false }
+eframe = { version = "0.36", default-features = false }
+egui = "0.36"
+egui_kittest = { version = "0.36" }
+exr = "1.74"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+getrandom = "0.3"
+gif = "0.14"
+harfrust = { version = "0.12", default-features = false, features = ["std"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+kurbo = { version = "0.13", features = ["serde"] }
+log = { version = "0.4" }
+pollster = "0.4"
+proptest = { version = "1" }
+rayon = { version = "1" }
+rfd = { version = "0.17" }
+roxmltree = "0.21"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+skrifa = { version = "0.44", default-features = false, features = ["std"] }
+sys-locale = "0.3"
+thiserror = { version = "2" }
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
+wasmi = { version = "2", default-features = false, features = ["std", "validate", "wat", "deterministic", "portable-dispatch"] }
+web-time = "1"
+wgpu = { version = "30.0.1", features = ["fragile-send-sync-non-atomic-wasm"] }
+zune-core = "0.5"
+zune-jpeg = "0.5"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+too_many_arguments = "allow"
+needless_range_loop = "allow"
+type_complexity = "allow"
+
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.filmcraft-h264]
+opt-level = 3
+
+[profile.dev.package.filmcraft-h264enc]
+opt-level = 3
+
+[profile.dev.package.filmcraft-hevc]
+opt-level = 3
+
+[profile.dev.package.filmcraft-prores]
+opt-level = 3
+
+[profile.dev.package.filmcraft-dnx]
+opt-level = 3
+
+[profile.dev.package.filmcraft-apv]
+opt-level = 3
+
+[profile.dev.package.filmcraft-dng]
+opt-level = 3
+
+[profile.dev.package.filmcraft-av1]
+opt-level = 3
+
+[profile.dev.package.filmcraft-aac]
+opt-level = 3
+
+[profile.dev.package.filmcraft-flac]
+opt-level = 3
+
+[profile.dev.package.filmcraft-audio-dsp]
+opt-level = 3
+
+[profile.dev.package.filmcraft-mxf]
+opt-level = 3
+
+[profile.dev.package.filmcraft-opus]
+opt-level = 3
+
+[profile.dev.package.filmcraft-vp8]
+opt-level = 3
+
+[profile.dev.package.filmcraft-vp9]
+opt-level = 3
+
+[profile.dev.package.effectcraft-raster]
+opt-level = 3
+
+[profile.dev.package.effectcraft-render]
+opt-level = 3
+
+[profile.dev.package.effectcraft-gpu]
+opt-level = 3
+
+[profile.dev.package.effectcraft-effects]
+opt-level = 3
+
+[profile.dev.package.effectcraft-track]
+opt-level = 3
+
+[profile.dev.package.effectcraft-path]
+opt-level = 3
+
+[profile.dev.package.effectcraft-media]
+opt-level = 3
+
+[profile.dev.package.effectcraft-opusenc]
+opt-level = 3
+
+[profile.dev.package.effectcraft-export]
+opt-level = 3
+
+[profile.dev.package.effectcraft-vp9enc]
+opt-level = 3
+
+[profile.dev.package.effectcraft-hevcenc]
+opt-level = 3
+
+[profile.dev.package.effectcraft-av1enc]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

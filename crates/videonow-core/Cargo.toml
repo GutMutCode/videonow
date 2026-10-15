@@ -1,0 +1,38 @@
+[package]
+name = "videonow-core"
+description = "One video production project: a FilmCraft timeline with EffectCraft compositions and PhotoCraft image documents nested in it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# timeline (FilmCraft)
+filmcraft-engine = { workspace = true }
+filmcraft-media = { workspace = true }
+filmcraft-frame = { workspace = true }
+filmcraft-time = { workspace = true }
+filmcraft-color = { workspace = true }
+# motion (EffectCraft)
+effectcraft-host = { workspace = true }
+effectcraft-engine = { workspace = true }
+effectcraft-project = { workspace = true }
+effectcraft-render = { workspace = true }
+effectcraft-raster = { workspace = true }
+effectcraft-time = { workspace = true }
+effectcraft-color = { workspace = true }
+effectcraft-expr = { workspace = true }
+effectcraft-model = { workspace = true }
+# image (PhotoCraft)
+photocraft-engine = { workspace = true }
+photocraft-doc = { workspace = true }
+photocraft-compose = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+image = { workspace = true }
+
+[lints]
+workspace = true

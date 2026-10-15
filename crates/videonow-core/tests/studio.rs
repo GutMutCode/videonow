@@ -1,0 +1,122 @@
+//! End-to-end behaviour of the studio: nesting across the three engines, receipts, strict
+//! parameters and undo. Everything goes through `Studio::execute`, as a client would.
+
+use serde_json::{Value, json};
+use videonow_core::Studio;
+
+fn ok(s: &mut Studio, id: &str, p: Value) -> Value {
+    match s.execute(id, p) {
+        Ok(v) => v,
+        Err(e) => panic!("{id}: {e}"),
+    }
+}
+
+/// A 64x64 sequence showing a 64x64 composition that holds a 64x64 image.
+fn nested_project() -> (Studio, u64, u64) {
+    let mut s = Studio::new();
+    let img = ok(&mut s, "studio:image.new", json!({"name": "Img", "width": 64, "height": 64, "background": "white"}))["result"]["asset"].as_u64().unwrap();
+    let comp = ok(&mut s, "studio:comp.new", json!({"name": "C", "width": 64, "height": 64, "fps": 30, "duration": 1}))["result"]["asset"].as_u64().unwrap();
+    ok(&mut s, "studio:image.toComp", json!({"image": img, "comp": comp}));
+    ok(&mut s, "timeline:file.newSequence", json!({"name": "S", "width": 64, "height": 64, "fps": 30, "video": 1, "audio": 1}));
+    ok(&mut s, "studio:asset.place", json!({"asset": comp, "track": "V1", "seconds": 0}));
+    (s, img, comp)
+}
+
+fn center(s: &Studio) -> [u8; 4] {
+    let (w, h, px, offline) = s.render_rgba(0.5, 1.0).unwrap();
+    assert!(offline.is_empty(), "offline media: {offline:?}");
+    let i = ((h / 2 * w + w / 2) * 4) as usize;
+    [px[i], px[i + 1], px[i + 2], px[i + 3]]
+}
+
+#[test]
+fn image_shows_through_composition_on_the_timeline() {
+    let (s, _, _) = nested_project();
+    let c = center(&s);
+    assert!(c[0] > 240 && c[1] > 240 && c[2] > 240, "expected the white image, got {c:?}");
+}
+
+/// Regression: a composition's cached frame went stale when only an image nested in it changed.
+#[test]
+fn editing_a_nested_image_updates_the_next_frame() {
+    let (mut s, img, _) = nested_project();
+    assert!(center(&s)[1] > 240);
+    ok(&mut s, "image:shape.create", json!({"asset": img, "kind": "rect", "rect": [16, 16, 32, 32], "fill": "#ff0000"}));
+    let c = center(&s);
+    assert!(c[0] > 200 && c[1] < 60 && c[2] < 60, "expected red after the edit, got {c:?}");
+}
+
+#[test]
+fn receipts_say_what_changed() {
+    let mut s = Studio::new();
+    let r = ok(&mut s, "studio:comp.new", json!({"name": "C", "width": 32, "height": 32}));
+    let rc = &r["receipt"];
+    assert_eq!(rc["revision"]["before"], 0);
+    assert_eq!(rc["revision"]["after"], 1);
+    let changed: Vec<&str> = rc["changed"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(changed.contains(&"motion") && changed.contains(&"studio"), "{changed:?}");
+    assert_eq!(rc["created"], json!([1]));
+
+    // a read changes nothing and does not move the revision
+    let r = ok(&mut s, "studio:inspect", json!({}));
+    assert_eq!(r["receipt"]["changed"], json!([]));
+    assert_eq!(r["receipt"]["revision"]["after"], 1);
+    assert_eq!(r["receipt"]["not_checked"], json!([]));
+
+    // an edit that changes the picture says the picture was not checked
+    let r = ok(&mut s, "motion:layer.newSolid", json!({"asset": 1, "color": "#336699"}));
+    assert_eq!(r["receipt"]["changed"], json!(["motion"]));
+    assert!(!r["receipt"]["not_checked"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn studio_commands_reject_unknown_parameters() {
+    let mut s = Studio::new();
+    let e = s.execute("studio:comp.new", json!({"nmae": "Typo"})).unwrap_err().to_string();
+    assert!(e.contains("unknown parameter `nmae`") && e.contains("name"), "{e}");
+    // nothing was created
+    assert_eq!(s.revision(), 0);
+    assert_eq!(s.assets().count(), 0);
+}
+
+#[test]
+fn unknown_commands_and_domains_are_errors() {
+    let mut s = Studio::new();
+    assert!(s.execute("timeline:no.such.command", json!({})).is_err());
+    assert!(s.execute("sound:play", json!({})).is_err());
+    assert!(s.execute("no-domain", json!({})).is_err());
+    assert!(s.execute("studio:inspect", json!([1, 2])).is_err());
+}
+
+#[test]
+fn image_commands_need_an_image_asset() {
+    let mut s = Studio::new();
+    let comp = ok(&mut s, "studio:comp.new", json!({"width": 32, "height": 32}))["result"]["asset"].clone();
+    let e = s.execute("image:shape.create", json!({"asset": comp, "kind": "rect", "rect": [0, 0, 4, 4]})).unwrap_err().to_string();
+    assert!(e.contains("is not an image"), "{e}");
+    let e = s.execute("image:shape.create", json!({"kind": "rect", "rect": [0, 0, 4, 4]})).unwrap_err().to_string();
+    assert!(e.contains("asset"), "{e}");
+}
+
+#[test]
+fn undo_goes_to_the_engine_that_changed() {
+    let mut s = Studio::new();
+    ok(&mut s, "studio:comp.new", json!({"name": "C", "width": 32, "height": 32}));
+    ok(&mut s, "motion:layer.newSolid", json!({"asset": 1, "color": "#336699"}));
+    let layers = |s: &mut Studio| ok(s, "studio:inspect", json!({}))["result"]["compositions"][0]["layers"].as_u64().unwrap();
+    assert_eq!(layers(&mut s), 1);
+    let r = ok(&mut s, "studio:undo", json!({}));
+    assert_eq!(r["result"]["undone"], json!(["motion"]));
+    assert_eq!(layers(&mut s), 0);
+}
+
+#[test]
+fn every_command_has_an_effect_class() {
+    let mut s = Studio::new();
+    let list = ok(&mut s, "studio:commands", json!({}))["result"].as_array().unwrap().clone();
+    assert!(list.len() > 1000, "only {} commands", list.len());
+    for d in ["timeline", "motion", "image", "studio"] {
+        assert!(list.iter().any(|c| c["domain"] == d), "no {d} commands");
+    }
+    assert!(list.iter().all(|c| c["effect"].is_string()));
+}

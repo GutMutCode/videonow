@@ -1,0 +1,7 @@
+// videonow run examples/hello.jsonl — a title composition on a one-track sequence
+{"id": "studio:comp.new", "params": {"name": "Title", "duration": 4}}
+{"id": "motion:layer.newSolid", "params": {"asset": 1, "color": "#14213d"}}
+{"id": "motion:layer.newText", "params": {"asset": 1, "text": "Hello", "size": 200, "fill": "#fca311"}}
+{"id": "timeline:file.newSequence", "params": {"name": "Main"}}
+{"id": "studio:asset.place", "params": {"asset": 1, "track": "V1"}}
+{"id": "studio:render.frame", "params": {"seconds": 1, "path": "hello.png", "scale": 0.5}}

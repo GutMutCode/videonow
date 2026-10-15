@@ -18,11 +18,14 @@
 pub mod assets;
 pub mod bridge;
 pub mod manifest;
+pub mod params_check;
+pub mod policy;
 pub mod project;
 pub mod receipt;
 mod studio;
 
 pub use assets::{Asset, AssetId, AssetKind};
+pub use policy::Policy;
 pub use receipt::Receipt;
 pub use studio::Studio;
 
@@ -42,6 +45,8 @@ pub enum StudioError {
     Motion(String),
     #[error("image: {0}")]
     Image(String),
+    #[error("not allowed: {0}")]
+    Denied(String),
     #[error("{0}")]
     Other(String),
 }

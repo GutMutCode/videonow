@@ -21,6 +21,9 @@ pub enum Effect {
     Destructive,
     /// Writes files outside the project (exports, saves).
     FileWrite,
+    /// Reaches outside the project and the file system: network downloads, other applications,
+    /// printers, system settings.
+    External,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -35,18 +38,45 @@ pub struct CommandInfo {
     pub summary: Option<&'static str>,
 }
 
-/// The effect class of an engine command, from its journal flag and id.
+/// The effect class of an engine command, from its id and journal flag.
+///
+/// The id comes first: an engine's `journal: false` means "not recorded in the history", which
+/// includes commands that export files, download models or open other applications. Only when
+/// the id names none of those does `journal: false` mean a read.
 pub fn infer_effect(id: &str, journal: bool) -> Effect {
-    if !journal {
-        return Effect::Read;
-    }
     let lower = id.to_ascii_lowercase();
-    if lower.contains("export") || lower.starts_with("file.save") || (lower.contains("render") && lower.contains("queue")) {
-        Effect::FileWrite
-    } else if ["delete", "clear", "remove", "purge", "discard"].iter().any(|w| lower.contains(w)) {
-        Effect::Destructive
-    } else {
-        Effect::Edit
+    let words: Vec<&str> = lower.split(|c: char| c == '.' || c == '_').collect();
+    let has = |w: &str| lower.contains(w);
+    if ["download", "install", "reveal", "launch", "openurl", "print", "browse"].iter().any(|w| has(w)) && !has("printers") && !has("preview") {
+        return Effect::External;
+    }
+    // `renderQueue.render`, `tts.render` write files; `renderQueue.list`, `sequence.renderBar` read
+    if has("export") || lower.starts_with("file.save") || words.iter().any(|w| w.starts_with("save")) || words.last() == Some(&"render") {
+        return Effect::FileWrite;
+    }
+    if ["delete", "clear", "remove", "purge", "discard"].iter().any(|w| has(w)) {
+        return Effect::Destructive;
+    }
+    if journal { Effect::Edit } else { Effect::Read }
+}
+
+/// Engine commands whose effect the id and journal flag get wrong, found by running every `read`
+/// command on a populated project (`tests/studio.rs`, `read_commands_change_nothing`): they are
+/// not journaled but change the document (view state stored in it, a document timeline).
+pub const EFFECT_OVERRIDES: &[(&str, &str, Effect)] = &[
+    ("timeline", "media.toggleProxies", Effect::Edit),
+    ("image", "select.isolateLayers", Effect::Edit),
+    ("image", "timeline.create", Effect::Edit),
+    ("image", "timeline.nextFrame", Effect::Edit),
+    ("image", "timeline.previousFrame", Effect::Edit),
+    ("image", "timeline.setProps", Effect::Edit),
+];
+
+/// An engine command's effect: a declared override, else inferred.
+pub fn engine_effect(domain: &str, id: &str, journal: bool) -> (Effect, &'static str) {
+    match EFFECT_OVERRIDES.iter().find(|(d, c, _)| *d == domain && *c == id) {
+        Some((_, _, e)) => (*e, "declared"),
+        None => (infer_effect(id, journal), "inferred"),
     }
 }
 
@@ -124,6 +154,17 @@ pub const STUDIO_COMMANDS: &[StudioCommand] = &[
     StudioCommand { id: "undo", effect: Effect::Edit, params: "{}", keys: &[], summary: "Undo the last change, in whichever engine made it." },
 ];
 
+/// The effect class of `domain:cmd`, if the command exists.
+pub fn effect_of(domain: &str, cmd: &str) -> Option<Effect> {
+    match domain {
+        "studio" => studio_command(cmd).map(|c| c.effect),
+        "timeline" => filmcraft_engine::find_command(cmd).map(|c| engine_effect(domain, c.id, c.journal).0),
+        "motion" => effectcraft_engine::find_command(cmd).map(|c| engine_effect(domain, c.id, c.journal).0),
+        "image" => photocraft_engine::commands::find(cmd).map(|c| engine_effect(domain, c.id, c.journal).0),
+        _ => None,
+    }
+}
+
 pub fn studio_command(id: &str) -> Option<&'static StudioCommand> {
     STUDIO_COMMANDS.iter().find(|c| c.id == id)
 }
@@ -135,13 +176,16 @@ pub fn all() -> Vec<CommandInfo> {
         .map(|c| CommandInfo { id: format!("studio:{}", c.id), domain: "studio", label: c.id.to_string(), params: c.params.to_string(), effect: c.effect, basis: "declared", summary: Some(c.summary) })
         .collect();
     for c in filmcraft_engine::command_specs() {
-        v.push(CommandInfo { id: format!("timeline:{}", c.id), domain: "timeline", label: c.label.to_string(), params: c.params.to_string(), effect: infer_effect(c.id, c.journal), basis: "inferred", summary: None });
+        let (effect, basis) = engine_effect("timeline", c.id, c.journal);
+        v.push(CommandInfo { id: format!("timeline:{}", c.id), domain: "timeline", label: c.label.to_string(), params: c.params.to_string(), effect, basis, summary: None });
     }
     for c in effectcraft_engine::command_specs() {
-        v.push(CommandInfo { id: format!("motion:{}", c.id), domain: "motion", label: c.label.to_string(), params: c.params.to_string(), effect: infer_effect(c.id, c.journal), basis: "inferred", summary: None });
+        let (effect, basis) = engine_effect("motion", c.id, c.journal);
+        v.push(CommandInfo { id: format!("motion:{}", c.id), domain: "motion", label: c.label.to_string(), params: c.params.to_string(), effect, basis, summary: None });
     }
     for c in photocraft_engine::command_specs() {
-        v.push(CommandInfo { id: format!("image:{}", c.id), domain: "image", label: c.label.to_string(), params: c.params.to_string(), effect: infer_effect(c.id, c.journal), basis: "inferred", summary: None });
+        let (effect, basis) = engine_effect("image", c.id, c.journal);
+        v.push(CommandInfo { id: format!("image:{}", c.id), domain: "image", label: c.label.to_string(), params: c.params.to_string(), effect, basis, summary: None });
     }
     v
 }
@@ -156,6 +200,16 @@ mod tests {
         assert_eq!(infer_effect("file.exportMedia", true), Effect::FileWrite);
         assert_eq!(infer_effect("timeline.rippleDelete", true), Effect::Destructive);
         assert_eq!(infer_effect("timeline.place", true), Effect::Edit);
+        // not journaled, but not reads
+        assert_eq!(infer_effect("lut.export", false), Effect::FileWrite);
+        assert_eq!(infer_effect("actions.save", false), Effect::FileWrite);
+        assert_eq!(infer_effect("tts.downloadVoices", false), Effect::External);
+        assert_eq!(infer_effect("file.reveal", false), Effect::External);
+        assert_eq!(infer_effect("file.export.presets.delete", false), Effect::FileWrite);
+        assert_eq!(infer_effect("file.printers", false), Effect::Read);
+        assert_eq!(infer_effect("renderQueue.list", false), Effect::Read);
+        assert_eq!(infer_effect("renderQueue.render", true), Effect::FileWrite);
+        assert_eq!(infer_effect("sequence.renderBar", false), Effect::Read);
     }
 
     #[test]

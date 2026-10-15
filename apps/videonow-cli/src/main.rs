@@ -22,12 +22,15 @@ fn main() {
             None => usage("run needs a script path"),
         },
         Some("commands") => commands(args.get(1).map(String::as_str)),
-        Some("mcp") => match videonow_automation::serve_stdio() {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("videonow mcp: {e}");
-                1
-            }
+        Some("mcp") => match mcp_policy(&args[1..]) {
+            Err(e) => usage(&e),
+            Ok(policy) => match videonow_automation::serve_stdio(policy) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("videonow mcp: {e}");
+                    1
+                }
+            },
         },
         Some("help" | "--help" | "-h") | None => {
             print!("{}", HELP);
@@ -38,13 +41,48 @@ fn main() {
     std::process::exit(code);
 }
 
+/// `mcp` options: files are confined to the working directory unless `--root` names other
+/// folders or `--allow-anywhere` lifts the confinement; `--deny CLASS` refuses an effect class.
+fn mcp_policy(args: &[String]) -> Result<videonow_core::Policy, String> {
+    use videonow_core::manifest::Effect;
+    let mut roots = Vec::new();
+    let (mut anywhere, mut deny) = (false, Vec::new());
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--root" => roots.push(PathBuf::from(it.next().ok_or("--root needs a folder")?)),
+            "--allow-anywhere" => anywhere = true,
+            "--deny" => deny.push(match it.next().map(String::as_str) {
+                Some("destructive") => Effect::Destructive,
+                Some("fileWrite") => Effect::FileWrite,
+                Some("external") => Effect::External,
+                Some("edit") => Effect::Edit,
+                other => return Err(format!("--deny takes destructive, fileWrite, external or edit, not {other:?}")),
+            }),
+            other => return Err(format!("unknown mcp option `{other}`")),
+        }
+    }
+    let mut p = if anywhere {
+        videonow_core::Policy::unrestricted()
+    } else {
+        if roots.is_empty() {
+            roots.push(std::env::current_dir().map_err(|e| format!("working directory: {e}"))?);
+        }
+        videonow_core::Policy::confined_to(&roots)
+    };
+    p.deny = deny;
+    Ok(p)
+}
+
 const HELP: &str = "videonow — one video production project across a timeline, compositions and images
 
 USAGE:
   videonow demo [OUT_DIR]       build a demo project and render frames into OUT_DIR (default videonow-demo)
   videonow run SCRIPT.jsonl     run {\"id\": \"domain:command\", \"params\": {...}} lines, one JSON result per line
   videonow commands [FILTER]    list commands of every engine with their effect class
-  videonow mcp                  serve MCP on stdio
+  videonow mcp [--root DIR]... [--allow-anywhere] [--deny CLASS]...
+                              serve MCP on stdio; files stay inside DIR (default: the working
+                              directory); CLASS is destructive, fileWrite, external or edit
 
 Command ids are `timeline:…` (FilmCraft), `motion:…` (EffectCraft), `image:…` (PhotoCraft) or `studio:…`.
 Exit status: 0 success, 1 a command failed, 2 usage error.

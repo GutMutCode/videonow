@@ -502,6 +502,69 @@ pub fn parse_timecode(input: &str, rate: FrameRate, drop_frame: bool, current: i
 /// Common audio sample rates offered in sequence settings.
 pub const SAMPLE_RATES: [i64; 6] = [32_000, 44_100, 48_000, 88_200, 96_000, 192_000];
 
+// Studio: from EffectCraft's copy of this crate, so both engines share one time crate.
+
+/// Format a frame count the way After Effects displays the current time: hours not padded
+/// (`0:00:02:15`, or `0;00;02;15` for drop-frame).
+pub fn format_timecode_ae(frame: i64, rate: FrameRate, drop_frame: bool) -> String {
+    let df = drop_frame && rate.supports_drop_frame();
+    let (neg, h, m, s, f) = frames_to_fields(frame, rate, df);
+    let sep = if df { ';' } else { ':' };
+    let fw = if rate.timecode_base() >= 100 { 3 } else { 2 };
+    format!("{}{h}{sep}{m:02}{sep}{s:02}{sep}{f:0fw$}", if neg { "-" } else { "" })
+}
+
+/// Format a frame count as Feet + Frames (film footage counting) with `per_foot` frames per
+/// foot (35 mm film: 16, 16 mm: 40): `0012+07`. Negative counts get a leading `-`.
+pub fn format_feet_frames(frame: i64, per_foot: i64) -> String {
+    let pf = per_foot.max(1);
+    let sign = if frame < 0 { "-" } else { "" };
+    let a = frame.unsigned_abs();
+    let pf = pf as u64;
+    let w = if pf > 100 { 3 } else { 2 };
+    format!("{sign}{:04}+{:0w$}", a / pf, a % pf)
+}
+
+/// Parse a Feet + Frames field into a frame count: `12+07` (feet + frames; frames may overflow
+/// a foot), `-1+04`, a bare frame count (`250`), or `+n` / `-n` frames relative to `current`.
+pub fn parse_feet_frames(input: &str, per_foot: i64, current: i64) -> Result<i64, ParseError> {
+    let s = input.trim();
+    let bad = || ParseError(format!("not feet+frames: `{input}`"));
+    let num = |t: &str| -> Result<i64, ParseError> {
+        let t = t.trim();
+        if t.is_empty() {
+            return Ok(0);
+        }
+        if !t.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(bad());
+        }
+        t.parse::<i64>().map_err(|_| ParseError("number too large".into()))
+    };
+    if s.is_empty() {
+        return Err(ParseError("empty feet+frames".into()));
+    }
+    let (sign, body) = match s.as_bytes()[0] {
+        b'-' => (-1, &s[1..]),
+        b'+' => (1, &s[1..]),
+        _ => (0, s),
+    };
+    match body.rfind('+') {
+        Some(i) => {
+            let (feet, frames) = (num(&body[..i])?, num(&body[i + 1..])?);
+            let v = feet.checked_mul(per_foot.max(1)).and_then(|v| v.checked_add(frames)).ok_or_else(|| ParseError("number too large".into()))?;
+            // A sign before feet+frames is the sign of the count, not a relative move.
+            Ok(if sign < 0 { -v } else { v })
+        }
+        None => {
+            let v = num(body)?;
+            Ok(match sign {
+                0 => v,
+                k => current.saturating_add(k * v),
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

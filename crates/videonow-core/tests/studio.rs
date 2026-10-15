@@ -169,3 +169,60 @@ fn open_refuses_what_is_not_a_project() {
     assert!(e.contains("not empty"), "{e}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Every command classed `read` runs on a populated project without changing it and without
+/// writing files (gap analysis P4: "check a read class by running it").
+#[test]
+fn read_commands_change_nothing() {
+    let (mut s, img, comp) = nested_project();
+    let list = ok(&mut s, "studio:commands", json!({}))["result"].as_array().unwrap().clone();
+    let cwd = tmpdir("reads");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::env::set_current_dir(&cwd).unwrap();
+    let mut changed = Vec::new();
+    let mut ran = 0;
+    for c in list.iter().filter(|c| c["effect"] == "read" && c["domain"] != "studio") {
+        let id = c["id"].as_str().unwrap();
+        let p = match c["domain"].as_str() {
+            Some("image") => json!({"asset": img}),
+            Some("motion") => json!({"asset": comp}),
+            _ => json!({}),
+        };
+        let Ok(r) = s.execute(id, p) else { continue }; // a read may need parameters; failing is fine
+        ran += 1;
+        if r["receipt"]["changed"] != json!([]) {
+            changed.push(format!("{id} changed {}", r["receipt"]["changed"]));
+        }
+    }
+    let written: Vec<_> = std::fs::read_dir(&cwd).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert!(ran > 100, "only {ran} read commands ran");
+    assert!(changed.is_empty(), "read commands that changed the project:\n{}", changed.join("\n"));
+    assert!(written.is_empty(), "read commands wrote files: {written:?}");
+}
+
+#[test]
+fn the_policy_is_enforced_and_survives_opening_a_project() {
+    use videonow_core::Policy;
+    use videonow_core::manifest::Effect;
+    let (mut s, _, _) = nested_project();
+    let root = tmpdir("policy");
+    std::fs::create_dir_all(&root).unwrap();
+    let saved = root.join("p.videonow");
+    ok(&mut s, "studio:project.save", json!({"path": saved.to_string_lossy()}));
+
+    s.set_policy(Policy { deny: vec![Effect::Destructive], ..Policy::confined_to(std::slice::from_ref(&root)) });
+    // inside the root: allowed
+    ok(&mut s, "studio:render.frame", json!({"path": root.join("in.png").to_string_lossy(), "scale": 0.5}));
+    // outside: refused before anything runs
+    let e = s.execute("studio:render.frame", json!({"path": "/tmp/../tmp/outside.png"})).unwrap_err().to_string();
+    assert!(e.contains("not allowed") && e.contains("outside"), "{e}");
+    // a denied class
+    let e = s.execute("studio:project.new", json!({})).unwrap_err().to_string();
+    assert!(e.contains("destructive"), "{e}");
+
+    // opening is destructive too; allow it, then check the confinement still holds afterwards
+    s.set_policy(Policy::confined_to(std::slice::from_ref(&root)));
+    ok(&mut s, "studio:project.open", json!({"path": saved.to_string_lossy()}));
+    assert!(s.execute("studio:render.frame", json!({"path": "/tmp/outside.png"})).is_err(), "opening a project lifted the policy");
+    let _ = std::fs::remove_dir_all(&root);
+}

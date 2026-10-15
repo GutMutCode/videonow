@@ -13,6 +13,7 @@ use filmcraft_time::Tick;
 use crate::assets::{self, Asset, AssetId, AssetKind, parse_uri};
 use crate::bridge::{CompMediaSource, Generation, ImageMediaSource, ImageSnapshot, MotionSnapshot, SharedImages, SharedMotion, StudioFootage};
 use crate::manifest::{self, studio_command};
+use crate::params_check::{self, KeyCheck};
 use crate::receipt::{ENGINE_CHECKED, NOT_CHECKED_VISUAL, Receipt, Revisions, STUDIO_CHECKED};
 use crate::{Result, StudioError};
 
@@ -38,6 +39,8 @@ pub struct Studio {
     pub(crate) undo: Vec<Vec<String>>,
     /// Where the project was last saved or opened from.
     pub(crate) project_path: Option<std::path::PathBuf>,
+    /// What clients of this studio may do (checked before every command).
+    pub(crate) policy: crate::policy::Policy,
 }
 
 impl Default for Studio {
@@ -103,6 +106,7 @@ impl Studio {
             journal: Vec::new(),
             undo: Vec::new(),
             project_path: None,
+            policy: crate::policy::Policy::unrestricted(),
         }
     }
 
@@ -116,6 +120,15 @@ impl Studio {
 
     pub fn image_session(&self, id: AssetId) -> Option<&photocraft_engine::Session> {
         self.images.get(&id)
+    }
+
+    /// Limit what clients of this studio may do (see [`crate::policy`]).
+    pub fn set_policy(&mut self, policy: crate::policy::Policy) {
+        self.policy = policy;
+    }
+
+    pub fn policy(&self) -> &crate::policy::Policy {
+        &self.policy
     }
 
     /// Where the project was last saved or opened from.
@@ -138,19 +151,25 @@ impl Studio {
         let before = self.marks();
         let rev_before = self.revision;
         let original = params.clone();
+        let mut key_check: Option<KeyCheck> = None;
+        let effect = manifest::effect_of(domain, cmd).ok_or_else(|| StudioError::UnknownCommand(id.to_string()))?;
+        self.policy.check(id, effect, &params).map_err(StudioError::Denied)?;
         let r = match domain {
             "timeline" => {
-                filmcraft_engine::find_command(cmd).ok_or_else(|| StudioError::UnknownCommand(id.to_string()))?;
+                let spec = filmcraft_engine::find_command(cmd).ok_or_else(|| StudioError::UnknownCommand(id.to_string()))?;
+                key_check = Some(params_check::check(domain, cmd, spec.params, &params).map_err(|m| bad(id, m))?);
                 self.timeline.execute(cmd, params).map_err(|e| StudioError::Timeline(e.to_string()))
             }
             "motion" => {
                 effectcraft_engine::find_command(cmd).ok_or_else(|| StudioError::UnknownCommand(id.to_string()))?;
                 let p = self.target_comp(id, params, &mut receipt)?;
+                key_check = Some(KeyCheck::ByEngine);
                 self.motion.execute(cmd, p).map_err(|e| StudioError::Motion(e.to_string()))
             }
             "image" => {
-                photocraft_engine::commands::find(cmd).ok_or_else(|| StudioError::UnknownCommand(id.to_string()))?;
+                let spec = photocraft_engine::commands::find(cmd).ok_or_else(|| StudioError::UnknownCommand(id.to_string()))?;
                 let (asset, p) = self.take_asset(id, params, "asset", AssetKind::Image)?;
+                key_check = Some(params_check::check(domain, cmd, spec.params, &p).map_err(|m| bad(id, m))?);
                 receipt.asset = Some(asset.0);
                 let s = self.images.get_mut(&asset).ok_or(StudioError::NoAsset(asset.0))?;
                 s.execute(cmd, p).map_err(|e| StudioError::Image(e.to_string()))
@@ -173,11 +192,18 @@ impl Studio {
         let result = r?;
         if domain == "studio" {
             receipt.checked = STUDIO_CHECKED.to_vec();
+            receipt.checked.push("delegation policy (effect class, file folders)");
         } else {
             receipt.checked = ENGINE_CHECKED.to_vec();
+            receipt.checked.push("delegation policy (effect class, file folders)");
+            match key_check {
+                Some(KeyCheck::Checked) => receipt.checked.push("unknown parameters rejected (params doc)"),
+                Some(KeyCheck::ByEngine) => receipt.checked.push("unknown parameters rejected (by the engine)"),
+                _ => receipt.not_checked.push("parameter names (the command's params doc is open-ended)"),
+            }
         }
         if receipt.changed.iter().any(|c| c != "studio") {
-            receipt.not_checked = NOT_CHECKED_VISUAL.to_vec();
+            receipt.not_checked.extend_from_slice(NOT_CHECKED_VISUAL);
         }
         // undo replays engine histories; replacing the whole project is not undoable
         let undoable = !(domain == "studio" && matches!(cmd, "undo" | "project.open" | "project.new" | "project.save"));
@@ -447,10 +473,11 @@ impl Studio {
             }
             "project.new" => {
                 let journal = std::mem::take(&mut self.journal);
-                let revision = self.revision;
+                let (revision, policy) = (self.revision, self.policy.clone());
                 *self = Studio::new();
                 self.journal = journal;
                 self.revision = revision;
+                self.policy = policy;
                 Ok(json!({"new": true}))
             }
             "undo" => {

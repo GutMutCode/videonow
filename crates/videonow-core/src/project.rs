@@ -135,6 +135,8 @@ impl Studio {
         // build the new studio fully before replacing this one: a failed open changes nothing
         let mut next = Studio::new();
         next.revision = self.revision;
+        // the delegation policy belongs to the session, not the project
+        next.policy = self.policy.clone();
         next.next_asset = m.next_asset;
         for a in &m.assets {
             next.assets.insert(a.id, a.clone());

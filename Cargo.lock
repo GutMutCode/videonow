@@ -2298,8 +2298,8 @@ dependencies = [
 name = "effectcraft-time"
 version = "0.1.0"
 dependencies = [
+ "filmcraft-time",
  "proptest",
- "serde",
 ]
 
 [[package]]

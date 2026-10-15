@@ -23,7 +23,7 @@ use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt, tool, tool_handler,
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use videonow_core::Studio;
+use videonow_core::{Policy, Studio};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AutomationError {
@@ -42,10 +42,11 @@ struct Worker {
 }
 
 impl Worker {
-    fn spawn() -> Self {
+    fn spawn(policy: Policy) -> Self {
         let (tx, rx) = mpsc::channel::<Job>();
         std::thread::spawn(move || {
             let mut studio = Studio::new();
+            studio.set_policy(policy);
             while let Ok(job) = rx.recv() {
                 // a panic in one command must not take the session down (never-crash rule)
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&mut studio)));
@@ -259,14 +260,9 @@ impl StudioMcp {
 }
 
 impl StudioMcp {
-    pub fn new() -> Self {
-        Self { worker: Worker::spawn(), tool_router: Self::tool_router() }
-    }
-}
-
-impl Default for StudioMcp {
-    fn default() -> Self {
-        Self::new()
+    /// A server whose studio enforces `policy` (see `videonow_core::policy`).
+    pub fn new(policy: Policy) -> Self {
+        Self { worker: Worker::spawn(policy), tool_router: Self::tool_router() }
     }
 }
 
@@ -280,10 +276,10 @@ impl ServerHandler for StudioMcp {
 }
 
 /// Serve MCP on stdin/stdout until the client disconnects.
-pub fn serve_stdio() -> Result<(), AutomationError> {
+pub fn serve_stdio(policy: Policy) -> Result<(), AutomationError> {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| AutomationError::Io(e.to_string()))?;
     rt.block_on(async {
-        let service = StudioMcp::new().serve((tokio::io::stdin(), tokio::io::stdout())).await.map_err(|e| AutomationError::Io(e.to_string()))?;
+        let service = StudioMcp::new(policy).serve((tokio::io::stdin(), tokio::io::stdout())).await.map_err(|e| AutomationError::Io(e.to_string()))?;
         service.waiting().await.map_err(|e| AutomationError::Io(e.to_string()))?;
         Ok(())
     })

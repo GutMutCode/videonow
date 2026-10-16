@@ -236,11 +236,20 @@ pub(crate) fn load_oriented(bytes: &[u8], fmt: Option<image::ImageFormat>) -> im
     Ok(img)
 }
 
+/// Studio: see [`video_turn`].
+const TIMELINE_DECODERS_TURN: bool = true;
+
 /// The rotation an MP4/MOV movie is shown with (a phone held upright records sideways frames and
 /// says so in its video track's header): the quarter turn nearest the track's rotation. Only the
 /// rotation counts; any mirroring, scaling or offset in the header is ignored, and other
 /// containers have none.
 pub(crate) fn video_turn(bytes: &[u8]) -> Orientation {
+    // Studio: the timeline engine's decoders (filmcraft-codecs, shared in VideoNow) now apply the
+    // track's display rotation themselves, to the reported size and to every frame; turning again
+    // here would show a portrait video upside down.
+    if TIMELINE_DECODERS_TURN {
+        return Orientation::NoTransforms;
+    }
     let Ok(file) = filmcraft_isobmff::open(bytes) else { return Orientation::NoTransforms };
     let Some(m) = file.tracks.iter().find(|t| t.kind == filmcraft_isobmff::TrackKind::Video).map(|t| t.matrix) else {
         return Orientation::NoTransforms;

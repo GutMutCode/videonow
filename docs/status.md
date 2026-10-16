@@ -29,6 +29,9 @@ phase's gate checks, and what is not done. Updated with each phase.
 - `videonow-desktop`: the three engines' editors as the Edit, Motion and Image workspaces, the
   asset list, the command palette (with dry run), the Agent panel (agent access over a localhost
   MCP port with a token, permissions, activity log of receipts, undo).
+- An agent attaches to the open window (`videonow mcp --attach`) and edits the project the
+  person sees; its receipts say `by: agent`, the panel's permissions apply, and a connection
+  without the token is closed (`tests/agent_attach.rs`).
 - The studio owns the engine sessions and lends each to its editor for a frame; edits made in
   an editor become `ui:<workspace>` receipts with the engine commands they ran.
 - Documents made in an editor become assets and are offered to the other engines; image tabs
@@ -66,7 +69,10 @@ phase's gate checks, and what is not done. Updated with each phase.
   or GitHub archives.
 - **Engine suites**: two FilmCraft tests fail in this environment (APV export, which the
   installed ffprobe 6.1 cannot read; one demo-project subsequence test). The same two failed
-  in the other phase-1 branch on unchanged code.
+  in the other phase-1 branch on unchanged code. Two EffectCraft media tests failed because the
+  engines now share FilmCraft's decoders, which already turn rotated video upright and put AAC
+  surround in WAV order; EffectCraft did both again. Fixed with two small `Studio:` patches
+  (`probe.rs`, `pool.rs`); the EffectCraft media suite passes.
 - **Audio playback in the window**: the timeline editor runs without an audio device here
   (no `cpal` output wired); composition audio reaches the mix and exports.
 - **Colour, text and raster libraries are still per engine.** Frames cross between engines in

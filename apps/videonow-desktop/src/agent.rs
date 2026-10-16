@@ -59,6 +59,8 @@ pub struct Agent {
     rx: mpsc::Receiver<Job>,
     stop: Option<Arc<AtomicBool>>,
     pub addr: Option<SocketAddr>,
+    /// The token a client sends first (also in the connection file).
+    pub token: Option<String>,
     pub connections: Arc<Mutex<Vec<SocketAddr>>>,
     pub last_event: Arc<Mutex<String>>,
     pub connection_file: Option<std::path::PathBuf>,
@@ -76,6 +78,7 @@ impl Agent {
             rx,
             stop: None,
             addr: None,
+            token: None,
             connections: Arc::default(),
             last_event: Arc::default(),
             connection_file: None,
@@ -126,6 +129,7 @@ impl Agent {
         match videonow_automation::serve_tcp(addr, token.clone(), self.tx.clone(), Some(wake), events, stop.clone()) {
             Ok(bound) => {
                 self.addr = Some(bound);
+                self.token = Some(token.clone());
                 self.stop = Some(stop);
                 self.error = None;
                 match videonow_automation::write_connection(bound, &token) {
@@ -144,6 +148,7 @@ impl Agent {
         if let Some(a) = self.addr.take() {
             videonow_automation::remove_connection(a);
         }
+        self.token = None;
         self.connection_file = None;
         if let Ok(mut c) = self.connections.lock() {
             c.clear();

@@ -488,6 +488,18 @@ impl VideoNowApp {
         }
     }
 
+    /// Turn agent access on (port 0: any free port); returns where it listens and the token a
+    /// client sends first.
+    pub fn start_agent(&mut self, port: u16, ctx: &egui::Context) -> Option<(std::net::SocketAddr, String)> {
+        self.agent.start(port, ctx);
+        Some((self.agent.addr?, self.agent.token.clone()?))
+    }
+
+    /// Let the agent run destructive commands, or not (the Agent panel's checkbox).
+    pub fn allow_agent_destructive(&mut self, allow: bool) {
+        self.agent.permissions.destructive = allow;
+    }
+
     pub fn quitting(&self) -> bool {
         self.quitting
     }

@@ -34,6 +34,11 @@ pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context, url: &str) -> Value {
 
 /// The prominent "Join us on Discord" button.
 pub fn discord_button(app: &mut PhotocraftApp, ui: &mut egui::Ui, min_width: f32) -> egui::Response {
+    // Studio: no community button (the ArtCraft Discord) in VideoNow
+    if !cfg!(test) {
+        let _ = (app, min_width);
+        return ui.allocate_response(egui::Vec2::ZERO, egui::Sense::hover());
+    }
     let r = crate::widgets::primary_button(ui, tl!("Join us on Discord"), min_width).on_hover_text(DISCORD);
     if r.clicked() {
         open(app, ui.ctx(), DISCORD);

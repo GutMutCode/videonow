@@ -15,9 +15,11 @@ VideoNow는 세 오픈소스 앱의 엔진을 하나로 묶어 시작했습니�
 ## 구조
 
 ```text
+apps/videonow-desktop       VideoNow 앱 창: 편집·모션·이미지 작업 공간, 자산 목록, 명령 팔레트, 에이전트 패널
+apps/videonow-cli           videonow 실행 파일: demo, run, commands, mcp, mcp --attach
 crates/videonow-core        하나의 프로젝트: 세 엔진 세션, 자산 표, 엔진 사이의 연결, 명령 진입점
 crates/videonow-automation  MCP 서버 (command_list, command_run, command_batch, doc_inspect, render_preview)
-apps/videonow-cli           videonow 실행 파일: demo, run, commands, mcp
+crates/videonow-eval        에이전트 평가: 시나리오 8개와 지표, 실제 에이전트 세션 채점
 engines/{film,effect,photo} 가져온 엔진 (각자의 crates/, assets/, docs/)
 ```
 
@@ -29,10 +31,13 @@ engines/{film,effect,photo} 가져온 엔진 (각자의 crates/, assets/, docs/)
 
 ## 빌드와 실행
 
-Rust 1.95 이상.
+Rust 1.95 이상. NixOS에서는 `nix run github:GutMutCode/videonow` (또는 `nix develop`).
 
 ```sh
-cargo build --release -p videonow-cli
+cargo build --release -p videonow-desktop -p videonow-cli
+
+# 앱 (데모 프로젝트로 시작)
+./target/release/videonow-desktop --demo
 
 # 이미지 → 컴포지션 → 타임라인을 거치는 데모 프로젝트를 만들고 프레임을 렌더
 ./target/release/videonow demo out/
@@ -43,9 +48,18 @@ cargo build --release -p videonow-cli
 # JSON Lines 스크립트 실행
 ./target/release/videonow run script.jsonl
 
-# AI 에이전트용 MCP 서버
+# AI 에이전트용 MCP 서버 (헤드리스, 자기 프로젝트)
 claude mcp add videonow -- /abs/path/target/release/videonow mcp
+
+# 열려 있는 앱의 프로젝트를 에이전트가 함께 편집 (앱의 Agent 패널에서 허용을 켠 뒤)
+claude mcp add videonow-app -- /abs/path/target/release/videonow mcp --attach
 ```
+
+앱에서는:
+
+- 위쪽의 **Edit / Motion / Image**가 세 편집기입니다. 컴포지션과 이미지는 한 프로젝트의 자산이고, 타임라인이나 컴포지션에 놓아도 계속 살아 있습니다. 타임라인에서 중첩 클립을 고르면 "Edit … in Motion ›"으로 바로 그 컴포지션을 엽니다.
+- **Commands**(Ctrl+Shift+P, F1)는 세 엔진과 스튜디오의 명령 2,400여 개를 찾아 실행하고, 결과와 영수증을 보여 줍니다. 실행 전에 Dry run으로 무엇이 바뀔지 볼 수 있습니다.
+- **Agent** 패널에서 에이전트 접근을 켜고, 무엇을 허용할지(파일 쓰기, 삭제·교체, 외부 접근, 프로젝트 폴더 밖) 정합니다. 사람과 에이전트의 모든 변경이 영수증과 함께 활동 기록에 쌓입니다.
 
 스크립트 예:
 
@@ -57,9 +71,18 @@ claude mcp add videonow -- /abs/path/target/release/videonow mcp
 {"id": "studio:render.frame", "params": {"seconds": 1, "path": "frame.png"}}
 ```
 
+## 에이전트를 위한 약속
+
+- 모든 명령은 `domain:command` 하나의 표면이고, 효과 분류(read, edit, destructive, fileWrite, external)가 붙어 있습니다.
+- 모르는 매개변수는 거부하고 받는 키를 알려 줍니다. 틀린 명령 이름에는 가장 가까운 명령을 제안합니다.
+- `request_id`로 재시도해도 한 번만 실행됩니다. `expect_revision`이 맞지 않으면(사람이나 다른 에이전트가 그 사이 바꿨으면) 무엇이 바뀌었는지와 함께 거부합니다.
+- `command_batch`는 원자적입니다: 한 단계가 실패하면 앞 단계를 되돌립니다. `"$0.asset"`처럼 앞 단계 결과를 씁니다.
+- `dry_run`과 `render_preview`의 `steps`는 바뀔 내용과 그 그림을 보여 주고 아무것도 남기지 않습니다.
+- `videonow mcp --log FILE`은 모든 도구 호출을 남기고, `videonow-eval score FILE PROJECT`가 그 세션을 채점합니다.
+
 ## 상태
 
-0단계(통합 뼈대)입니다. 헤드리스 엔진, 중첩 렌더, 통합 명령, MCP가 동작합니다. 프로젝트 저장과 열기, 엔진 명령의 엄격한 검증은 1단계, 통합 UI는 2단계입니다.
+설계 문서의 로드맵 1–4단계를 구현했습니다. 단계별 상태와 남은 일은 설계 문서와 `docs/status.md`에 있습니다.
 
 ## 라이선스
 

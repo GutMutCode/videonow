@@ -17,12 +17,14 @@
 
 pub mod assets;
 pub mod bridge;
+pub mod demo;
 pub mod manifest;
 pub mod params_check;
 pub mod policy;
 pub mod project;
 pub mod receipt;
 mod studio;
+mod sync;
 
 pub use assets::{Asset, AssetId, AssetKind};
 pub use policy::Policy;

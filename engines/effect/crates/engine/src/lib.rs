@@ -517,6 +517,12 @@ pub struct Session {
     /// is, settings that guard what scripts may do can't change (see
     /// [`prefs::Scripting::same_permissions`]).
     pub script_calls: ScriptCalls,
+    /// Studio: commands the host application handles itself (VideoNow saves and opens whole
+    /// projects, of which this session's document is one part). When set and it accepts a
+    /// command id, [`Session::execute`] queues the call in `host_requests` instead of running it.
+    pub host_commands: Option<fn(&str) -> bool>,
+    /// Studio: calls queued for the host by `host_commands`, oldest first.
+    pub host_requests: Vec<(String, Value)>,
 }
 
 /// The count behind [`Session::running_for_script`]; only the engine changes it.
@@ -610,6 +616,8 @@ impl Default for Session {
             check_footage_on_open: false,
             footage_stamps: Default::default(),
             footage_scan: None,
+            host_commands: None,
+            host_requests: Vec::new(),
             script_calls: ScriptCalls::default(),
         }
     }
@@ -623,6 +631,13 @@ impl Session {
     /// Run a command by id.
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
         let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        // Studio: the host's own commands go to the host
+        if let Some(host) = self.host_commands
+            && host(id)
+        {
+            self.host_requests.push((id.to_string(), params));
+            return Ok(serde_json::json!({"handledBy": "host"}));
+        }
         if let Err(why) = (spec.enabled)(self) {
             // Explicit targets (agents, scripts) don't need a UI selection.
             let explicit = (["layer", "layers", "prop", "keys"].iter().any(|k| params.get(k).is_some()) && commands::has_comp(self).is_ok())

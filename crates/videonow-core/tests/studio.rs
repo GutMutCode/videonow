@@ -77,6 +77,17 @@ fn studio_commands_reject_unknown_parameters() {
     // nothing was created
     assert_eq!(s.revision(), 0);
     assert_eq!(s.assets().count(), 0);
+
+    // engine commands too: a misspelled key in each domain is refused before anything changes
+    let (mut s, img, comp) = nested_project();
+    let rev = s.revision();
+    let e = s.execute("motion:layer.newSolid", json!({"asset": comp, "colour": "#ff0000"})).unwrap_err().to_string();
+    assert!(e.contains("colour"), "{e}");
+    let e = s.execute("image:shape.create", json!({"asset": img, "kind": "rect", "rect": [0, 0, 4, 4], "fil": "#ff0000"})).unwrap_err().to_string();
+    assert!(e.contains("fil"), "{e}");
+    let e = s.execute("timeline:file.newSequence", json!({"name": "T", "widht": 10})).unwrap_err().to_string();
+    assert!(e.contains("widht"), "{e}");
+    assert_eq!(s.revision(), rev, "a refused command changed the project");
 }
 
 #[test]

@@ -92,6 +92,7 @@ pub fn media_key(m: &MediaClip) -> String {
         MediaRef::File { path } if m.offline => format!("offline:{path}"),
         MediaRef::File { path } => format!("file:{path}"),
         MediaRef::Generator(g) => format!("generator:{g:?}"),
+        MediaRef::Nested { uri } => format!("nested:{uri}"),
     }
 }
 
@@ -299,15 +300,18 @@ impl MediaPool {
         {
             return Some(s.clone());
         }
-        // Studio: a composition or image document of the same project renders live
-        if let MediaRef::File { path } = &m.media
-            && let Some(src) = self.resolve_nested(path)
-        {
-            self.offline.write().unwrap_or_else(|e| e.into_inner()).remove(&item);
-            self.sources.write().unwrap_or_else(|e| e.into_inner()).insert(item, (key, src.clone()));
-            return Some(src);
-        }
         let src: SharedSource = match &m.media {
+            // Studio: a composition or image document of the same project renders live
+            MediaRef::Nested { uri } => match self.resolve_nested(uri) {
+                Some(src) => {
+                    self.offline.write().unwrap_or_else(|e| e.into_inner()).remove(&item);
+                    src
+                }
+                None => {
+                    self.set_offline(item, OfflineReason::Missing, uri, "no such composition or image in this project");
+                    Arc::new(SlateSource::new(m.info.clone(), uri, OfflineReason::Missing))
+                }
+            },
             MediaRef::Generator(g) => {
                 let v = m.info.video.as_ref();
                 let (w, h, r) = v.map(|v| (v.width, v.height, v.frame_rate)).unwrap_or((1920, 1080, Default::default()));

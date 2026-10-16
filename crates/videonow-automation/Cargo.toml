@@ -12,7 +12,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 rmcp = { version = "3.5", default-features = false, features = ["server", "macros", "transport-io"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync", "io-util", "net", "time"] }
 base64 = "0.22"
 schemars = "1"
 image = { workspace = true }

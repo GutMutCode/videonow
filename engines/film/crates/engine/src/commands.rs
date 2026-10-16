@@ -696,7 +696,7 @@ pub fn import_nested(s: &mut Session, uri: &str, name: &str, src: filmcraft_medi
             &name_s,
             label,
             ItemKind::Media(MediaClip {
-                media: MediaRef::File { path: uri_s },
+                media: MediaRef::Nested { uri: uri_s },
                 info,
                 interpret: Default::default(),
                 mark_in: None,
@@ -709,7 +709,7 @@ pub fn import_nested(s: &mut Session, uri: &str, name: &str, src: filmcraft_medi
             bin,
         ))
     })?;
-    s.media.insert_keyed(id, format!("file:{uri}"), src);
+    s.media.insert_keyed(id, format!("nested:{uri}"), src);
     Ok(id)
 }
 

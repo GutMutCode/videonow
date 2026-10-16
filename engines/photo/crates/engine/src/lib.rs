@@ -482,6 +482,12 @@ pub struct Session {
     /// document, source read-only)`. The shell takes them with [`Session::take_held_open`].
     held_opens: Vec<(u64, Document, bool)>,
     next_held_open: u64,
+    /// Studio: commands the host application handles itself (VideoNow saves whole projects, of
+    /// which this session's documents are part). The editor's menus queue those in
+    /// `host_requests` instead of running them.
+    pub host_commands: Option<fn(&str) -> bool>,
+    /// Studio: calls queued for the host by `host_commands`, oldest first.
+    pub host_requests: Vec<(String, Value)>,
 }
 
 /// Move item `i` of `v` to position `to`, clamped to the end. Returns where it went; `None` when

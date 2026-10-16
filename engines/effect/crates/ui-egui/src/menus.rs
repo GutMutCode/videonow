@@ -291,6 +291,13 @@ fn only_comp(p: &Value) -> Option<effectcraft_engine::project::ItemId> {
 
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    // Studio: the host's own commands (whole-project files) go to the host, before any dialog
+    if let Some(host) = app.session.host_commands
+        && host(id)
+    {
+        app.session.host_requests.push((id.to_string(), params));
+        return Ok(Value::Null);
+    }
     if id == "effects.copyPresetsFolderPath" {
         return frontend(app, ctx, id, params);
     }

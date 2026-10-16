@@ -169,6 +169,8 @@ type_complexity = "allow"
 [profile.dev]
 opt-level = 1
 debug = "line-tables-only"
+# 1.3M lines of engine code: the incremental cache grew to 16 GB and saved little
+incremental = false
 
 [profile.dev.package."*"]
 opt-level = 2

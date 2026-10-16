@@ -447,6 +447,12 @@ pub struct Session {
     pub media_stamps: std::collections::HashMap<String, media_watch::Stamp>,
     /// The stamps being taken on a worker thread ([`Session::start_media_scan`]).
     pub media_scan: Option<media_watch::MediaScan>,
+    /// Studio: commands the host application handles itself (VideoNow saves and opens whole
+    /// projects, of which this session's document is one part). When set and it accepts a
+    /// command id, [`Session::execute`] queues the call in `host_requests` instead of running it.
+    pub host_commands: Option<fn(&str) -> bool>,
+    /// Studio: calls queued for the host by `host_commands`, oldest first.
+    pub host_requests: Vec<(String, Value)>,
 }
 
 /// An export advanced a batch at a time on the host's thread ([`Session::pump_jobs`]).
@@ -539,6 +545,8 @@ impl Session {
             exec_depth: 0,
             media_stamps: Default::default(),
             media_scan: None,
+            host_commands: None,
+            host_requests: Vec::new(),
         }
     }
 
@@ -691,6 +699,13 @@ impl Session {
     /// Run a command by id.
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
         let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        // Studio: the host's own commands go to the host
+        if let Some(host) = self.host_commands
+            && host(id)
+        {
+            self.host_requests.push((id.to_string(), params));
+            return Ok(serde_json::json!({"handledBy": "host"}));
+        }
         if self.exec_depth == 0 && spec.journal && self.trim_play.active() {
             self.settle_trim_playback(id);
         }

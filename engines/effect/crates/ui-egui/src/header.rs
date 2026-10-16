@@ -654,9 +654,8 @@ fn ws_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
     }
 }
 
-/// The ArtCraft mark as supplied in `docs/brand` (the README's and getartcraft.com's logo; used
-/// unmodified, see `docs/brand/LICENSE-brand.txt`).
-static ARTCRAFT_MARK: &[u8] = include_bytes!("../../../docs/brand/artcraft-mark.png");
+/// Studio: the VideoNow mark (`assets/brand/` at the repository root; it replaced the ArtCraft mark).
+static ARTCRAFT_MARK: &[u8] = include_bytes!("../../../../../assets/brand/videonow-mark.png");
 
 /// The ArtCraft mark in `r` (decoded once into a mipmapped texture, so it stays crisp from the
 /// 24 px Tools bar to the About dialog). Nothing is drawn if it can't be decoded.

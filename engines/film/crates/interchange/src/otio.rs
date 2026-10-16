@@ -243,6 +243,10 @@ impl Exp<'_, '_> {
                 };
                 json!({"OTIO_SCHEMA": "ExternalReference.1", "name": name, "target_url": url, "available_range": avail, "available_image_bounds": null, "metadata": meta})
             }
+            // Studio: no file to point at; other applications see a missing reference
+            MediaRef::Nested { uri } => {
+                json!({"OTIO_SCHEMA": "MissingReference.1", "name": name, "available_range": avail, "available_image_bounds": null, "metadata": {"filmcraft": {"item": item.0, "nested": uri, "info": m.info}}})
+            }
         }
     }
 

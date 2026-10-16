@@ -5,6 +5,7 @@
 //! videonow run SCRIPT.jsonl      run {"id": "...", "params": {...}} lines; print one result per line
 //! videonow commands [FILTER]     list commands (all engines) with their effect class
 //! videonow mcp                   serve the Model Context Protocol on stdio
+//! videonow mcp --attach [TARGET]  connect stdio to the open desktop application's agent port
 //! ```
 
 use std::io::{BufRead, Write};
@@ -22,6 +23,17 @@ fn main() {
             None => usage("run needs a script path"),
         },
         Some("commands") => commands(args.get(1).map(String::as_str)),
+        Some("mcp") if args.get(1).map(String::as_str) == Some("--attach") => {
+            let target = args.get(2).map(String::as_str).filter(|a| !a.starts_with("--"));
+            let token = args.iter().position(|a| a == "--token").and_then(|i| args.get(i + 1)).map(String::as_str);
+            match videonow_automation::proxy_stdio(target, token) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("videonow mcp --attach: {e}");
+                    1
+                }
+            }
+        }
         Some("mcp") => match mcp_policy(&args[1..]) {
             Err(e) => usage(&e),
             Ok(policy) => match videonow_automation::serve_stdio(policy) {
@@ -83,6 +95,9 @@ USAGE:
   videonow mcp [--root DIR]... [--allow-anywhere] [--deny CLASS]...
                               serve MCP on stdio; files stay inside DIR (default: the working
                               directory); CLASS is destructive, fileWrite, external or edit
+  videonow mcp --attach [FILE | HOST:PORT --token T]
+                              serve MCP on stdio for the project open in VideoNow (the desktop
+                              application, with agent access turned on in its Agent panel)
 
 Command ids are `timeline:…` (FilmCraft), `motion:…` (EffectCraft), `image:…` (PhotoCraft) or `studio:…`.
 Exit status: 0 success, 1 a command failed, 2 usage error.
@@ -165,26 +180,9 @@ fn demo(out: &Path) -> i32 {
         Ok(r["result"].clone())
     };
     let r = (|| -> Result<(), String> {
-        // 1. image engine: a badge
-        let badge = step(&mut s, "studio:image.new", json!({"name": "Badge", "width": 640, "height": 640, "background": "transparent"}))?["asset"].clone();
-        step(&mut s, "image:shape.create", json!({"asset": badge, "kind": "ellipse", "rect": [20, 20, 600, 600], "fill": "#f2b134"}))?;
-        step(&mut s, "image:shape.create", json!({"asset": badge, "kind": "ellipse", "rect": [120, 120, 400, 400], "fill": "#1d2b53"}))?;
-        // 2. motion engine: an animated title with the badge in it
-        let title = step(&mut s, "studio:comp.new", json!({"name": "Title", "width": 1920, "height": 1080, "fps": 30, "duration": 4}))?["asset"].clone();
-        let text = step(&mut s, "motion:layer.newText", json!({"asset": title, "text": "STUDIO", "size": 220, "fill": "#ffffff", "position": [960, 900]}))?["layer"].clone();
-        step(&mut s, "motion:prop.addKey", json!({"asset": title, "layer": text, "path": "transform/opacity", "time": 0.0, "value": 0}))?;
-        step(&mut s, "motion:prop.addKey", json!({"asset": title, "layer": text, "path": "transform/opacity", "time": 1.0, "value": 100}))?;
-        let placed = step(&mut s, "studio:image.toComp", json!({"image": badge, "comp": title, "time": 0}))?;
-        let badge_layer = placed["layer"]["layer"].clone();
-        step(&mut s, "motion:prop.set", json!({"asset": title, "layer": badge_layer, "path": "transform/position", "value": [960, 430]}))?;
-        step(&mut s, "motion:prop.addKey", json!({"asset": title, "layer": badge_layer, "path": "transform/scale", "time": 0.0, "value": [0, 0]}))?;
-        step(&mut s, "motion:prop.addKey", json!({"asset": title, "layer": badge_layer, "path": "transform/scale", "time": 1.2, "value": [100, 100]}))?;
-        // 3. timeline: a sequence with a matte, the title composition on top
-        step(&mut s, "timeline:file.newSequence", json!({"name": "Main", "width": 1920, "height": 1080, "fps": 30, "video": 2, "audio": 1}))?;
-        let matte = step(&mut s, "timeline:file.newColorMatte", json!({"color": "#20304a", "seconds": 4}))?;
-        let matte_item = matte.get("item").cloned().unwrap_or(matte.clone());
-        step(&mut s, "timeline:timeline.place", json!({"item": matte_item, "track": "V1", "seconds": 0}))?;
-        step(&mut s, "studio:asset.place", json!({"asset": title, "track": "V2", "seconds": 0}))?;
+        // 1–3. the demo project: badge → title composition → sequence
+        let demo = videonow_core::demo::build(&mut s, step)?;
+        let badge = demo.badge;
         // 4. render
         for (t, name) in [(0.2, "frame-0.2s.png"), (1.0, "frame-1.0s.png"), (2.5, "frame-2.5s.png")] {
             step(&mut s, "studio:render.frame", json!({"seconds": t, "path": png(name), "scale": 0.5}))?;

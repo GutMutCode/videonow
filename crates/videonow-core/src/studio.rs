@@ -9,6 +9,7 @@ use effectcraft_project::{Footage, FootageKind, ItemId as MotionItemId, ItemKind
 use effectcraft_render::FootageSource;
 use filmcraft_media::SharedSource;
 use filmcraft_time::Tick;
+use photocraft_doc::{DocId, Document};
 
 use crate::assets::{self, Asset, AssetId, AssetKind, parse_uri};
 use crate::bridge::{CompMediaSource, Generation, ImageMediaSource, ImageSnapshot, MotionSnapshot, SharedImages, SharedMotion, StudioFootage};
@@ -22,8 +23,13 @@ pub struct Studio {
     pub timeline: filmcraft_engine::Session,
     /// EffectCraft: every composition of the project.
     pub motion: effectcraft_engine::Session,
-    /// PhotoCraft: one session per image document.
-    pub(crate) images: BTreeMap<AssetId, photocraft_engine::Session>,
+    /// PhotoCraft: every image document of the project, one document per image asset.
+    pub images: photocraft_engine::Session,
+    /// The document that holds each image asset.
+    pub(crate) image_docs: BTreeMap<AssetId, DocId>,
+    /// Image assets whose document was closed in the image editor: their last state. A command
+    /// or the editor reopens them (`Studio::open_image`); saving writes them as they are.
+    pub(crate) parked: BTreeMap<AssetId, Arc<Document>>,
     pub(crate) assets: BTreeMap<AssetId, Asset>,
     pub(crate) next_asset: u64,
     pub(crate) shared_motion: SharedMotion,
@@ -41,6 +47,15 @@ pub struct Studio {
     pub(crate) project_path: Option<std::path::PathBuf>,
     /// What clients of this studio may do (checked before every command).
     pub(crate) policy: crate::policy::Policy,
+    /// Who is acting, for receipts and the journal (see [`Receipt::by`]).
+    pub(crate) actor: String,
+    /// The engines' documents as of the last command or editor sync.
+    pub(crate) last: EngineMarks,
+    /// How much of each engine's own journal the studio has accounted for.
+    pub(crate) seen: JournalMarks,
+    /// The engines' documents as of the last save, open or new project (unsaved changes = any
+    /// difference).
+    pub(crate) saved: EngineMarks,
 }
 
 impl Default for Studio {
@@ -50,34 +65,48 @@ impl Default for Studio {
 }
 
 /// Where each engine's document stands (its revision and its snapshot pointer).
-#[derive(Clone, PartialEq)]
-struct EngineMarks {
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct EngineMarks {
     timeline: (u64, usize),
     motion: (u64, usize),
     images: BTreeMap<AssetId, (u64, usize)>,
-    assets: usize,
+    assets: Vec<Asset>,
 }
 
-fn read<T: Clone>(l: &RwLock<T>) -> T {
+/// Lengths of the engines' own command journals.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct JournalMarks {
+    pub timeline: usize,
+    pub motion: usize,
+    pub images: usize,
+}
+
+pub(crate) fn read<T: Clone>(l: &RwLock<T>) -> T {
     l.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-fn bad(cmd: &str, msg: impl Into<String>) -> StudioError {
+pub(crate) fn bad(cmd: &str, msg: impl Into<String>) -> StudioError {
     StudioError::BadParams { cmd: cmd.to_string(), msg: msg.into() }
 }
 
-fn u64_of(v: &Value) -> Option<u64> {
+pub(crate) fn u64_of(v: &Value) -> Option<u64> {
     v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
 }
 
 impl Studio {
+    /// A studio over fresh headless engine sessions.
     pub fn new() -> Self {
-        let mut motion = effectcraft_host::session();
+        Self::with_sessions(filmcraft_engine::Session::default(), effectcraft_host::session(), photocraft_engine::Session::new())
+    }
+
+    /// A studio over engine sessions the caller configured (the desktop application's, with its
+    /// preferences, decoders and services). Anything already open in them becomes assets on the
+    /// first [`Studio::sync_editors`].
+    pub fn with_sessions(timeline: filmcraft_engine::Session, mut motion: effectcraft_engine::Session, images: photocraft_engine::Session) -> Self {
         let shared_images: SharedImages = Arc::default();
         let footage: Arc<dyn FootageSource> = Arc::new(StudioFootage::new(motion.footage.clone(), shared_images.clone()));
         motion.footage = footage.clone();
         let shared_motion: SharedMotion = Arc::new(RwLock::new(MotionSnapshot { project: motion.project.clone(), revision: 0 }));
-        let timeline = filmcraft_engine::Session::default();
         let registry: Arc<RwLock<HashMap<AssetId, Asset>>> = Arc::default();
         let generation: Generation = Arc::default();
         {
@@ -91,10 +120,12 @@ impl Studio {
                 }
             }));
         }
-        Self {
+        let mut s = Self {
             timeline,
             motion,
-            images: BTreeMap::new(),
+            images,
+            image_docs: BTreeMap::new(),
+            parked: BTreeMap::new(),
             assets: BTreeMap::new(),
             next_asset: 1,
             shared_motion,
@@ -107,7 +138,15 @@ impl Studio {
             undo: Vec::new(),
             project_path: None,
             policy: crate::policy::Policy::unrestricted(),
-        }
+            actor: "api".into(),
+            last: EngineMarks::default(),
+            seen: JournalMarks::default(),
+            saved: EngineMarks::default(),
+        };
+        s.last = s.marks();
+        s.seen = s.journal_marks();
+        s.saved = s.last.clone();
+        s
     }
 
     pub fn revision(&self) -> u64 {
@@ -118,8 +157,36 @@ impl Studio {
         self.assets.values()
     }
 
-    pub fn image_session(&self, id: AssetId) -> Option<&photocraft_engine::Session> {
-        self.images.get(&id)
+    pub fn asset_info(&self, id: AssetId) -> Option<&Asset> {
+        self.assets.get(&id)
+    }
+
+    /// The image document of an image asset: open in the image engine, or as it was when its
+    /// editor tab was closed.
+    pub fn image_document(&self, id: AssetId) -> Option<Arc<Document>> {
+        match self.image_index(id) {
+            Some(i) => self.images.documents().get(i).map(|d| d.doc.clone()),
+            None => self.parked.get(&id).cloned(),
+        }
+    }
+
+    /// The image asset a document of the image engine holds, if any.
+    pub fn asset_of_document(&self, doc: DocId) -> Option<AssetId> {
+        self.image_docs.iter().find(|(_, d)| **d == doc).map(|(a, _)| *a)
+    }
+
+    /// The composition asset of a motion-engine composition item, if any.
+    pub fn asset_of_comp(&self, comp: u64) -> Option<AssetId> {
+        self.assets.values().find(|a| a.kind == AssetKind::Composition && a.comp == Some(comp)).map(|a| a.id)
+    }
+
+    /// The asset a timeline project item shows (a nested composition or image), if any.
+    pub fn asset_of_timeline_item(&self, item: u64) -> Option<AssetId> {
+        let it = self.timeline.project.item(filmcraft_engine::project::ItemId(item))?;
+        match &it.as_media()?.media {
+            filmcraft_engine::project::MediaRef::Nested { uri } => parse_uri(uri).map(|(_, id)| id),
+            _ => None,
+        }
     }
 
     /// Limit what clients of this studio may do (see [`crate::policy`]).
@@ -131,9 +198,37 @@ impl Studio {
         &self.policy
     }
 
+    /// Run `f` with another policy and actor (an agent's commands in the desktop application),
+    /// then put the studio's own back.
+    pub fn as_actor<T>(&mut self, actor: &str, policy: Option<crate::policy::Policy>, f: impl FnOnce(&mut Self) -> T) -> T {
+        let saved_actor = std::mem::replace(&mut self.actor, actor.to_string());
+        let saved_policy = policy.map(|p| std::mem::replace(&mut self.policy, p));
+        let r = f(self);
+        self.actor = saved_actor;
+        if let Some(p) = saved_policy {
+            self.policy = p;
+        }
+        r
+    }
+
+    /// Who receipts and journal entries name as acting (default `api`).
+    pub fn set_actor(&mut self, actor: &str) {
+        self.actor = actor.to_string();
+    }
+
     /// Where the project was last saved or opened from.
     pub fn project_path(&self) -> Option<&std::path::Path> {
         self.project_path.as_deref()
+    }
+
+    /// Has anything changed since the project was last saved, opened or started?
+    pub fn is_dirty(&self) -> bool {
+        self.marks() != self.saved
+    }
+
+    /// Every change so far, oldest first (`studio:journal`).
+    pub fn journal(&self) -> &[Value] {
+        &self.journal
     }
 
     /// Run any command: `timeline:<id>`, `motion:<id>`, `image:<id>` or `studio:<id>`.
@@ -142,18 +237,27 @@ impl Studio {
     /// `motion:` commands take an optional `"asset"` (a composition asset) and run on that
     /// composition; `image:` commands need `"asset"` (an image asset).
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
+        // changes made outside commands (an editor, direct engine calls) are accounted for first,
+        // so this command's receipt names only what it did
+        if self.marks() != self.last {
+            self.sync_editors("external");
+        }
         let params = if params.is_null() { json!({}) } else { params };
         if !params.is_object() {
             return Err(bad(id, "params must be a JSON object"));
         }
         let (domain, cmd) = id.split_once(':').ok_or_else(|| StudioError::UnknownCommand(id.to_string()))?;
-        let mut receipt = Receipt { command: id.to_string(), domain: domain.to_string(), ..Default::default() };
-        let before = self.marks();
+        let mut receipt = Receipt { command: id.to_string(), domain: domain.to_string(), by: self.actor.clone(), ..Default::default() };
+        let before = self.last.clone();
         let rev_before = self.revision;
         let original = params.clone();
         let mut key_check: Option<KeyCheck> = None;
         let effect = manifest::effect_of(domain, cmd).ok_or_else(|| StudioError::UnknownCommand(id.to_string()))?;
+        if let Some(instead) = manifest::host_command(domain, cmd) {
+            return Err(bad(id, format!("in a VideoNow project use {instead}: this command acts on one engine's document only")));
+        }
         self.policy.check(id, effect, &params).map_err(StudioError::Denied)?;
+        let assets_before = self.assets.len();
         let r = match domain {
             "timeline" => {
                 let spec = filmcraft_engine::find_command(cmd).ok_or_else(|| StudioError::UnknownCommand(id.to_string()))?;
@@ -161,22 +265,31 @@ impl Studio {
                 self.timeline.execute(cmd, params).map_err(|e| StudioError::Timeline(e.to_string()))
             }
             "motion" => {
-                effectcraft_engine::find_command(cmd).ok_or_else(|| StudioError::UnknownCommand(id.to_string()))?;
+                let spec = effectcraft_engine::find_command(cmd).ok_or_else(|| StudioError::UnknownCommand(id.to_string()))?;
                 let p = self.target_comp(id, params, &mut receipt)?;
-                key_check = Some(KeyCheck::ByEngine);
-                self.motion.execute(cmd, p).map_err(|e| StudioError::Motion(e.to_string()))
+                // the engine rejects unknown keys itself when the command's doc lists them
+                let closed = effectcraft_engine::commands::accepted_params(spec.params).is_some();
+                key_check = Some(if closed { KeyCheck::ByEngine } else { KeyCheck::Open });
+                self.motion.execute_checked(cmd, p).map_err(|e| StudioError::Motion(e.to_string()))
             }
             "image" => {
                 let spec = photocraft_engine::commands::find(cmd).ok_or_else(|| StudioError::UnknownCommand(id.to_string()))?;
                 let (asset, p) = self.take_asset(id, params, "asset", AssetKind::Image)?;
                 key_check = Some(params_check::check(domain, cmd, spec.params, &p).map_err(|m| bad(id, m))?);
                 receipt.asset = Some(asset.0);
-                let s = self.images.get_mut(&asset).ok_or(StudioError::NoAsset(asset.0))?;
-                s.execute(cmd, p).map_err(|e| StudioError::Image(e.to_string()))
+                let i = self.open_image(asset)?;
+                self.images.set_active(i);
+                self.images.execute(cmd, p).map_err(|e| StudioError::Image(e.to_string()))
             }
             "studio" => self.studio(cmd, params, &mut receipt),
             _ => Err(StudioError::UnknownCommand(id.to_string())),
         };
+        // documents a command opened (an import as a new document, a new composition) become
+        // assets like the ones an editor makes
+        if !(domain == "studio" && matches!(cmd, "project.open" | "project.new")) {
+            receipt.created.extend(self.adopt());
+            receipt.created.dedup();
+        }
         // publish even after a failure: a command that failed half-way may have changed state
         self.publish();
         let after = self.marks();
@@ -185,8 +298,16 @@ impl Studio {
             // saving rewrites the engines' file metadata (path, saved time), not the work itself
             receipt.changed.clear();
         }
+        if self.assets.len() != assets_before && !receipt.changed.iter().any(|c| c == "studio") {
+            receipt.changed.push("studio".into());
+        }
         if !receipt.changed.is_empty() {
             self.revision += 1;
+        }
+        self.last = after;
+        self.seen = self.journal_marks();
+        if domain == "studio" && matches!(cmd, "project.save" | "project.open" | "project.new") && r.is_ok() {
+            self.saved = self.last.clone();
         }
         receipt.revision = Revisions { before: rev_before, after: self.revision };
         let result = r?;
@@ -216,16 +337,31 @@ impl Studio {
         Ok(json!({"result": result, "receipt": receipt}))
     }
 
-    fn marks(&self) -> EngineMarks {
+    pub(crate) fn marks(&self) -> EngineMarks {
         EngineMarks {
             timeline: (self.timeline.revision, Arc::as_ptr(&self.timeline.project) as usize),
             motion: (self.motion.revision, Arc::as_ptr(&self.motion.project) as usize),
-            images: self.images.iter().map(|(id, s)| (*id, s.active().map(|d| (d.revision, Arc::as_ptr(&d.doc) as usize)).unwrap_or((0, 0)))).collect(),
-            assets: self.assets.len() * 1_000_003 + self.assets.values().map(|a| a.timeline_item.is_some() as usize + a.motion_footage.is_some() as usize).sum::<usize>(),
+            images: self
+                .assets
+                .values()
+                .filter(|a| a.kind == AssetKind::Image)
+                .map(|a| {
+                    let m = match self.image_index(a.id).and_then(|i| self.images.documents().get(i)) {
+                        Some(d) => (d.revision, Arc::as_ptr(&d.doc) as usize),
+                        None => (0, self.parked.get(&a.id).map_or(0, |d| Arc::as_ptr(d) as usize)),
+                    };
+                    (a.id, m)
+                })
+                .collect(),
+            assets: self.assets.values().cloned().collect(),
         }
     }
 
-    fn changed(a: &EngineMarks, b: &EngineMarks) -> Vec<String> {
+    pub(crate) fn journal_marks(&self) -> JournalMarks {
+        JournalMarks { timeline: self.timeline.journal.len(), motion: self.motion.journal.len(), images: self.images.journal.len() }
+    }
+
+    pub(crate) fn changed(a: &EngineMarks, b: &EngineMarks) -> Vec<String> {
         let mut v = Vec::new();
         if a.timeline != b.timeline {
             v.push("timeline".to_string());
@@ -255,12 +391,13 @@ impl Studio {
             }
         }
         {
+            let docs: Vec<(AssetId, Arc<Document>)> = self.assets.values().filter(|a| a.kind == AssetKind::Image).filter_map(|a| self.image_document(a.id).map(|d| (a.id, d))).collect();
             let mut w = self.shared_images.write().unwrap_or_else(|e| e.into_inner());
-            for (id, s) in &self.images {
-                let Some(d) = s.active() else { continue };
-                if w.get(id).is_none_or(|x| !Arc::ptr_eq(&x.doc, &d.doc)) {
+            w.retain(|id, _| self.assets.contains_key(id));
+            for (id, doc) in docs {
+                if w.get(&id).is_none_or(|x| !Arc::ptr_eq(&x.doc, &doc)) {
                     seq += 1;
-                    w.insert(*id, ImageSnapshot { doc: d.doc.clone(), revision: seq });
+                    w.insert(id, ImageSnapshot { doc, revision: seq });
                 }
             }
         }
@@ -274,6 +411,30 @@ impl Studio {
         self.next_asset += 1;
         self.assets.insert(id, Asset { id, kind, name: name.to_string(), comp, timeline_item: None, motion_footage: None });
         id
+    }
+
+    /// Index of an image asset's document among the image engine's open documents.
+    pub(crate) fn image_index(&self, id: AssetId) -> Option<usize> {
+        let doc = self.image_docs.get(&id)?;
+        self.images.documents().iter().position(|d| d.doc.id == *doc)
+    }
+
+    /// The open document of an image asset, reopening it from its last state if its editor tab
+    /// was closed. Returns its index in the image engine.
+    pub fn open_image(&mut self, id: AssetId) -> Result<usize> {
+        if let Some(i) = self.image_index(id) {
+            return Ok(i);
+        }
+        match self.assets.get(&id) {
+            Some(a) if a.kind == AssetKind::Image => {}
+            Some(_) => return Err(StudioError::WrongKind(id.0, "an image")),
+            None => return Err(StudioError::NoAsset(id.0)),
+        }
+        let doc = self.parked.remove(&id).or_else(|| read(&self.shared_images).get(&id).map(|s| s.doc.clone())).ok_or(StudioError::NoAsset(id.0))?;
+        let i = self.images.add_document((*doc).clone(), None);
+        let new_id = self.images.documents().get(i).map(|d| d.doc.id).ok_or(StudioError::NoAsset(id.0))?;
+        self.image_docs.insert(id, new_id);
+        Ok(i)
     }
 
     fn asset(&self, cmd: &str, v: Option<&Value>, key: &str, kind: AssetKind) -> Result<Asset> {
@@ -301,6 +462,86 @@ impl Studio {
         self.motion.open_comp(MotionItemId(comp));
         receipt.asset = Some(a.id.0);
         Ok(p)
+    }
+
+    /// The timeline project item that shows asset `id`, importing it (as a live nested source)
+    /// if there is none yet or the one there was deleted.
+    pub(crate) fn ensure_timeline_item(&mut self, id: AssetId) -> Result<u64> {
+        let a = self.assets.get(&id).cloned().ok_or(StudioError::NoAsset(id.0))?;
+        if let Some(i) = a.timeline_item
+            && self.timeline.project.item(filmcraft_engine::project::ItemId(i)).is_some()
+        {
+            return Ok(i);
+        }
+        self.publish();
+        let src: SharedSource = match a.kind {
+            AssetKind::Composition => {
+                let comp = a.comp.ok_or_else(|| StudioError::Other(format!("asset {} has no composition", id.0)))?;
+                Arc::new(
+                    CompMediaSource::new(&a.name, MotionItemId(comp), self.shared_motion.clone(), self.generation.clone(), self.footage.clone())
+                        .ok_or_else(|| StudioError::Other(format!("composition {comp} not found")))?,
+                )
+            }
+            AssetKind::Image => Arc::new(ImageMediaSource::new(&a.name, a.id, self.shared_images.clone()).ok_or_else(|| StudioError::Other(format!("image {} has no document", id.0)))?),
+        };
+        let uri = assets::uri(a.kind, a.id);
+        let it = filmcraft_engine::commands::import_nested(&mut self.timeline, &uri, &a.name, src, None).map_err(|e| StudioError::Timeline(e.to_string()))?;
+        if let Some(x) = self.assets.get_mut(&id) {
+            x.timeline_item = Some(it.0);
+        }
+        Ok(it.0)
+    }
+
+    /// The motion project's footage item that shows image asset `id` inside compositions,
+    /// adding it if there is none yet or the one there was deleted.
+    pub(crate) fn ensure_motion_footage(&mut self, id: AssetId) -> Result<u64> {
+        let a = self.assets.get(&id).cloned().ok_or(StudioError::NoAsset(id.0))?;
+        if a.kind != AssetKind::Image {
+            return Err(StudioError::WrongKind(id.0, "an image"));
+        }
+        if let Some(f) = a.motion_footage
+            && self.motion.project.items.contains_key(&MotionItemId(f))
+        {
+            return Ok(f);
+        }
+        let doc = self.image_document(id).ok_or(StudioError::NoAsset(id.0))?;
+        let (w, h) = (doc.bounds().width(), doc.bounds().height());
+        let f = Footage {
+            path: assets::uri(AssetKind::Image, id),
+            kind: FootageKind::Still,
+            width: w,
+            height: h,
+            pixel_aspect: 1.0,
+            frame_rate: effectcraft_time::FrameRate::new(30, 1),
+            duration: effectcraft_time::Tick::from_seconds_f64(10.0),
+            has_video: true,
+            ..Default::default()
+        };
+        let name = a.name.clone();
+        let fid = self
+            .motion
+            .edit(&format!("Add {name}"), None, |pr, _| Ok(pr.add_item(&name, effectcraft_color::Label::Aqua, None, MotionItemKind::Footage(f))))
+            .map_err(|e| StudioError::Motion(e.to_string()))?;
+        if let Some(x) = self.assets.get_mut(&id) {
+            x.motion_footage = Some(fid.0);
+        }
+        Ok(fid.0)
+    }
+
+    /// Make a new asset available to the other engines: every asset in the timeline's project
+    /// panel, every image in the motion project. Failures are warnings, not errors: the asset
+    /// exists either way and `studio:asset.place` / `studio:image.toComp` retry.
+    pub(crate) fn link_asset(&mut self, id: AssetId) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if let Err(e) = self.ensure_timeline_item(id) {
+            warnings.push(format!("asset {}: not in the timeline project yet ({e})", id.0));
+        }
+        if self.assets.get(&id).is_some_and(|a| a.kind == AssetKind::Image)
+            && let Err(e) = self.ensure_motion_footage(id)
+        {
+            warnings.push(format!("asset {}: not in the motion project yet ({e})", id.0));
+        }
+        warnings
     }
 
     fn studio(&mut self, cmd: &str, p: Value, receipt: &mut Receipt) -> Result<Value> {
@@ -347,6 +588,8 @@ impl Studio {
                     .map_err(|e| StudioError::Motion(e.to_string()))?;
                 let comp = r.get("comp").and_then(u64_of).ok_or_else(|| StudioError::Other(format!("comp.new returned no composition id: {r}")))?;
                 let id = self.add_asset(AssetKind::Composition, &name, Some(comp));
+                self.publish();
+                receipt.warnings.extend(self.link_asset(id));
                 receipt.created.push(id.0);
                 receipt.asset = Some(id.0);
                 Ok(json!({"asset": id.0, "comp": comp, "name": name}))
@@ -355,11 +598,20 @@ impl Studio {
                 let n = self.assets.len() + 1;
                 let name = str_p("name").map(str::to_string).unwrap_or_else(|| format!("Image {n}"));
                 let (w, h) = (u64_p("width").unwrap_or(1920), u64_p("height").unwrap_or(1080));
+                if !(1..=30000).contains(&w) || !(1..=30000).contains(&h) {
+                    return Err(bad(&full, "width and height must be 1..30000"));
+                }
                 let background = str_p("background").unwrap_or("transparent");
-                let mut s = photocraft_engine::Session::new();
-                s.execute("file.new", json!({"width": w, "height": h, "background": background, "name": name})).map_err(|e| StudioError::Image(e.to_string()))?;
+                let count = self.images.documents().len();
+                self.images.execute("file.new", json!({"width": w, "height": h, "background": background, "name": name})).map_err(|e| StudioError::Image(e.to_string()))?;
+                let doc = match self.images.documents().get(count) {
+                    Some(d) if self.images.documents().len() == count + 1 => d.doc.id,
+                    _ => return Err(StudioError::Other("image engine did not open a new document".into())),
+                };
                 let id = self.add_asset(AssetKind::Image, &name, None);
-                self.images.insert(id, s);
+                self.image_docs.insert(id, doc);
+                self.publish();
+                receipt.warnings.extend(self.link_asset(id));
                 receipt.created.push(id.0);
                 receipt.asset = Some(id.0);
                 Ok(json!({"asset": id.0, "name": name, "width": w, "height": h}))
@@ -367,32 +619,11 @@ impl Studio {
             "asset.place" => {
                 let v = p.get("asset");
                 let id = v.and_then(u64_of).ok_or_else(|| bad(&full, "`asset` must be an asset id"))?;
-                let a = self.assets.get(&AssetId(id)).cloned().ok_or(StudioError::NoAsset(id))?;
+                if !self.assets.contains_key(&AssetId(id)) {
+                    return Err(StudioError::NoAsset(id));
+                }
                 receipt.asset = Some(id);
-                let item = match a.timeline_item {
-                    Some(i) => i,
-                    None => {
-                        self.publish();
-                        let src: SharedSource = match a.kind {
-                            AssetKind::Composition => {
-                                let comp = a.comp.ok_or_else(|| StudioError::Other(format!("asset {id} has no composition")))?;
-                                Arc::new(
-                                    CompMediaSource::new(&a.name, MotionItemId(comp), self.shared_motion.clone(), self.generation.clone(), self.footage.clone())
-                                        .ok_or_else(|| StudioError::Other(format!("composition {comp} not found")))?,
-                                )
-                            }
-                            AssetKind::Image => Arc::new(
-                                ImageMediaSource::new(&a.name, a.id, self.shared_images.clone()).ok_or_else(|| StudioError::Other(format!("image {id} has no document")))?,
-                            ),
-                        };
-                        let uri = assets::uri(a.kind, a.id);
-                        let it = filmcraft_engine::commands::import_nested(&mut self.timeline, &uri, &a.name, src, None).map_err(|e| StudioError::Timeline(e.to_string()))?;
-                        if let Some(x) = self.assets.get_mut(&a.id) {
-                            x.timeline_item = Some(it.0);
-                        }
-                        it.0
-                    }
-                };
+                let item = self.ensure_timeline_item(AssetId(id))?;
                 let mut tp = json!({"item": item, "seconds": f64_p("seconds").unwrap_or(0.0)});
                 if let Some(t) = p.get("track") {
                     tp["track"] = t.clone();
@@ -405,38 +636,10 @@ impl Studio {
                 let comp_a = self.asset(&full, p.get("comp"), "comp", AssetKind::Composition)?;
                 receipt.asset = Some(comp_a.id.0);
                 let comp = MotionItemId(comp_a.comp.ok_or_else(|| StudioError::Other(format!("asset {} has no composition", comp_a.id.0)))?);
-                let footage_item = match img.motion_footage {
-                    Some(f) => f,
-                    None => {
-                        let (w, h) = self
-                            .images
-                            .get(&img.id)
-                            .and_then(|s| s.active())
-                            .map(|d| (d.doc.bounds().width(), d.doc.bounds().height()))
-                            .ok_or(StudioError::NoAsset(img.id.0))?;
-                        let c = self.motion.project.comp(comp).ok_or_else(|| StudioError::Other(format!("composition {} not found", comp.0)))?;
-                        let f = Footage {
-                            path: assets::uri(AssetKind::Image, img.id),
-                            kind: FootageKind::Still,
-                            width: w,
-                            height: h,
-                            pixel_aspect: 1.0,
-                            frame_rate: c.frame_rate,
-                            duration: c.duration,
-                            has_video: true,
-                            ..Default::default()
-                        };
-                        let name = img.name.clone();
-                        let fid = self
-                            .motion
-                            .edit(&format!("Add {name}"), None, |pr, _| Ok(pr.add_item(&name, effectcraft_color::Label::Aqua, None, MotionItemKind::Footage(f))))
-                            .map_err(|e| StudioError::Motion(e.to_string()))?;
-                        if let Some(x) = self.assets.get_mut(&img.id) {
-                            x.motion_footage = Some(fid.0);
-                        }
-                        fid.0
-                    }
-                };
+                if self.motion.project.comp(comp).is_none() {
+                    return Err(StudioError::Other(format!("composition {} not found", comp.0)));
+                }
+                let footage_item = self.ensure_motion_footage(img.id)?;
                 let layer = self
                     .motion
                     .execute("layer.addItem", json!({"comp": comp.0, "item": footage_item, "time": f64_p("time").unwrap_or(0.0)}))
@@ -472,12 +675,7 @@ impl Studio {
                 Ok(r)
             }
             "project.new" => {
-                let journal = std::mem::take(&mut self.journal);
-                let (revision, policy) = (self.revision, self.policy.clone());
-                *self = Studio::new();
-                self.journal = journal;
-                self.revision = revision;
-                self.policy = policy;
+                self.new_project()?;
                 Ok(json!({"new": true}))
             }
             "undo" => {
@@ -489,12 +687,12 @@ impl Studio {
                     } else if d == "motion" {
                         self.motion.execute("edit.undo", json!({})).map_err(|e| StudioError::Motion(e.to_string()))?;
                     } else if let Some(id) = d.strip_prefix("image:").and_then(|s| s.parse::<u64>().ok()) {
-                        if let Some(s) = self.images.get_mut(&AssetId(id)) {
-                            s.execute("edit.undo", json!({})).map_err(|e| StudioError::Image(e.to_string()))?;
-                        }
+                        let i = self.open_image(AssetId(id))?;
+                        self.images.set_active(i);
+                        self.images.execute("edit.undo", json!({})).map_err(|e| StudioError::Image(e.to_string()))?;
                     } else {
-                        // the asset table itself is not under undo yet (design: roadmap phase 1)
-                        receipt.warnings.push("asset table changes are not undone yet".into());
+                        // the asset table itself is not under undo
+                        receipt.warnings.push("asset table changes are not undone".into());
                         continue;
                     }
                     undone.push(d.clone());
@@ -529,6 +727,7 @@ impl Studio {
                     "fps": c.map(|c| c.frame_rate.num as f64 / c.frame_rate.den.max(1) as f64),
                     "duration": c.map(|c| c.duration.0 as f64 / filmcraft_time::TICKS_PER_SECOND as f64),
                     "layers": c.map(|c| c.layers.len()),
+                    "missing": c.is_none(),
                     "onTimeline": a.timeline_item,
                 })
             })
@@ -538,11 +737,14 @@ impl Studio {
             .values()
             .filter(|a| a.kind == AssetKind::Image)
             .map(|a| {
-                let d = self.images.get(&a.id).and_then(|s| s.active());
+                let d = self.image_index(a.id).and_then(|i| self.images.documents().get(i));
+                let doc = self.image_document(a.id);
                 json!({
                     "asset": a.id.0, "name": a.name,
-                    "width": d.map(|d| d.doc.bounds().width()), "height": d.map(|d| d.doc.bounds().height()),
+                    "width": doc.as_ref().map(|d| d.bounds().width()), "height": doc.as_ref().map(|d| d.bounds().height()),
+                    "layers": doc.as_ref().map(|d| d.layers.len()),
                     "revision": d.map(|d| d.revision),
+                    "open": d.is_some(),
                     "onTimeline": a.timeline_item, "inComps": a.motion_footage.is_some(),
                 })
             })
@@ -551,6 +753,8 @@ impl Studio {
         let seq_name = seq_id.and_then(|id| self.timeline.project.item(id)).map(|i| i.name.clone());
         json!({
             "revision": self.revision,
+            "unsaved": self.is_dirty(),
+            "path": self.project_path.as_ref().map(|p| p.to_string_lossy()),
             "compositions": comps,
             "images": images,
             "sequence": self.timeline.active_sequence().map(|q| json!({

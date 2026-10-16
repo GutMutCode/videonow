@@ -36,6 +36,49 @@ pub struct CommandInfo {
     pub basis: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<&'static str>,
+    /// For engine commands that replace or save an engine's whole document: the studio command
+    /// to use instead. The studio refuses these (see [`HOST_COMMANDS`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instead: Option<&'static str>,
+}
+
+/// Engine commands that create, open, revert or save an engine's whole document. In a studio
+/// project these belong to the studio: run on one engine they would leave the others (and the
+/// asset table) behind. `Studio::execute` refuses them and names the studio command to use; the
+/// desktop application hands the same menu items to its own project handling.
+pub const HOST_COMMANDS: &[(&str, &str, &str)] = &[
+    ("timeline", "file.newProject", "studio:project.new"),
+    ("timeline", "file.newProjectFromTemplate", "studio:project.new"),
+    ("timeline", "file.openDemoProject", "studio:project.open"),
+    ("timeline", "file.open", "studio:project.open"),
+    ("timeline", "file.closeProject", "studio:project.new"),
+    ("timeline", "file.closeAllProjects", "studio:project.new"),
+    ("timeline", "file.save", "studio:project.save"),
+    ("timeline", "file.saveAs", "studio:project.save"),
+    ("timeline", "file.saveAll", "studio:project.save"),
+    ("timeline", "file.revert", "studio:project.open"),
+    ("motion", "file.newProject", "studio:project.new"),
+    ("motion", "file.newFromTemplate", "studio:project.new"),
+    ("motion", "file.openDemoProject", "studio:project.open"),
+    ("motion", "file.open", "studio:project.open"),
+    ("motion", "file.openRecent", "studio:project.open"),
+    ("motion", "file.closeProject", "studio:project.new"),
+    ("motion", "file.save", "studio:project.save"),
+    ("motion", "file.saveAs", "studio:project.save"),
+    ("motion", "file.revert", "studio:project.open"),
+    ("image", "file.close", "the image workspace (project images stay in the project)"),
+    ("image", "file.closeAll", "the image workspace (project images stay in the project)"),
+    ("image", "file.closeOthers", "the image workspace (project images stay in the project)"),
+];
+
+/// The studio command to use instead of `domain:cmd`, when that is a [`HOST_COMMANDS`] entry.
+pub fn host_command(domain: &str, cmd: &str) -> Option<&'static str> {
+    HOST_COMMANDS.iter().find(|(d, c, _)| *d == domain && *c == cmd).map(|(_, _, i)| *i)
+}
+
+/// For an engine session's `host_commands` filter: is `cmd` of `domain` handled by the host?
+pub fn is_host_command(domain: &str, cmd: &str) -> bool {
+    host_command(domain, cmd).is_some()
 }
 
 /// The effect class of an engine command, from its id and journal flag.
@@ -173,19 +216,19 @@ pub fn studio_command(id: &str) -> Option<&'static StudioCommand> {
 pub fn all() -> Vec<CommandInfo> {
     let mut v: Vec<CommandInfo> = STUDIO_COMMANDS
         .iter()
-        .map(|c| CommandInfo { id: format!("studio:{}", c.id), domain: "studio", label: c.id.to_string(), params: c.params.to_string(), effect: c.effect, basis: "declared", summary: Some(c.summary) })
+        .map(|c| CommandInfo { id: format!("studio:{}", c.id), domain: "studio", label: c.id.to_string(), params: c.params.to_string(), effect: c.effect, basis: "declared", summary: Some(c.summary), instead: None })
         .collect();
     for c in filmcraft_engine::command_specs() {
         let (effect, basis) = engine_effect("timeline", c.id, c.journal);
-        v.push(CommandInfo { id: format!("timeline:{}", c.id), domain: "timeline", label: c.label.to_string(), params: c.params.to_string(), effect, basis, summary: None });
+        v.push(CommandInfo { id: format!("timeline:{}", c.id), domain: "timeline", label: c.label.to_string(), params: c.params.to_string(), effect, basis, summary: None, instead: host_command("timeline", c.id) });
     }
     for c in effectcraft_engine::command_specs() {
         let (effect, basis) = engine_effect("motion", c.id, c.journal);
-        v.push(CommandInfo { id: format!("motion:{}", c.id), domain: "motion", label: c.label.to_string(), params: c.params.to_string(), effect, basis, summary: None });
+        v.push(CommandInfo { id: format!("motion:{}", c.id), domain: "motion", label: c.label.to_string(), params: c.params.to_string(), effect, basis, summary: None, instead: host_command("motion", c.id) });
     }
     for c in photocraft_engine::command_specs() {
         let (effect, basis) = engine_effect("image", c.id, c.journal);
-        v.push(CommandInfo { id: format!("image:{}", c.id), domain: "image", label: c.label.to_string(), params: c.params.to_string(), effect, basis, summary: None });
+        v.push(CommandInfo { id: format!("image:{}", c.id), domain: "image", label: c.label.to_string(), params: c.params.to_string(), effect, basis, summary: None, instead: host_command("image", c.id) });
     }
     v
 }
@@ -210,6 +253,16 @@ mod tests {
         assert_eq!(infer_effect("renderQueue.list", false), Effect::Read);
         assert_eq!(infer_effect("renderQueue.render", true), Effect::FileWrite);
         assert_eq!(infer_effect("sequence.renderBar", false), Effect::Read);
+    }
+
+    #[test]
+    fn host_commands_exist_in_their_engines() {
+        for (d, c, instead) in HOST_COMMANDS {
+            assert!(effect_of(d, c).is_some(), "{d}:{c} is not an engine command");
+            if let Some(s) = instead.strip_prefix("studio:") {
+                assert!(studio_command(s).is_some(), "{instead} is not a studio command");
+            }
+        }
     }
 
     #[test]

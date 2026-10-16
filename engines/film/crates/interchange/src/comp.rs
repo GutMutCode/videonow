@@ -424,6 +424,11 @@ impl Exporter<'_> {
                 self.report.warn("synthetic media (bars, colour mattes, …) is not exported (left as gaps)");
                 return None;
             }
+            // Studio: a nested composition or image has no file another application could open
+            MediaRef::Nested { .. } => {
+                self.report.warn("nested compositions and images are not exported (left as gaps); render them to a file first");
+                return None;
+            }
         };
         let ckind = if kind == TrackKind::Video { CKind::Picture } else { CKind::Sound };
         // the source channel this slot plays when broken out to mono

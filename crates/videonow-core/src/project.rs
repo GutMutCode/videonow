@@ -74,8 +74,9 @@ impl Studio {
         self.motion.execute("file.saveAs", json!({"path": s(&motion)})).map_err(|e| StudioError::Motion(e.to_string()))?;
 
         let mut images = std::collections::BTreeMap::new();
-        for (id, session) in &self.images {
-            let doc = session.active().map(|d| d.doc.clone()).ok_or(StudioError::NoAsset(id.0))?;
+        let image_assets: Vec<AssetId> = self.assets.values().filter(|a| a.kind == AssetKind::Image).map(|a| a.id).collect();
+        for id in image_assets {
+            let doc = self.image_document(id).ok_or(StudioError::NoAsset(id.0))?;
             let rel = format!("{IMAGES_DIR}/{}.pcraft", id.0);
             let bytes = photocraft_format::save_to_bytes(&doc, &photocraft_format::SaveOptions::default()).map_err(|e| StudioError::Image(e.to_string()))?;
             let path = dir.join(&rel);
@@ -110,8 +111,10 @@ impl Studio {
         Ok(json!({"path": s(dir), "assets": manifest.assets.len(), "images": manifest.images.len()}))
     }
 
-    /// Replace the studio's project with the one in `dir`. The studio revision keeps counting;
-    /// undo history does not survive (the engines start fresh histories).
+    /// Replace the studio's project with the one in `dir`. The engine sessions stay (with their
+    /// preferences and services); their documents are replaced. Every file is read and checked
+    /// before anything is replaced, so a failed open changes nothing. The studio revision keeps
+    /// counting; undo history does not survive (the engines start fresh histories).
     pub fn open_project(&mut self, dir: &Path) -> Result<Value> {
         let mpath = dir.join(MANIFEST);
         let text = std::fs::read(&mpath).map_err(|e| io(&mpath, e))?;
@@ -132,37 +135,70 @@ impl Studio {
         };
         let s = |p: &Path| p.to_string_lossy().into_owned();
 
-        // build the new studio fully before replacing this one: a failed open changes nothing
-        let mut next = Studio::new();
-        next.revision = self.revision;
-        // the delegation policy belongs to the session, not the project
-        next.policy = self.policy.clone();
-        next.next_asset = m.next_asset;
-        for a in &m.assets {
-            next.assets.insert(a.id, a.clone());
-        }
+        // read and check everything first
         let motion = inside(&m.motion)?;
-        next.motion.execute("file.open", json!({"path": s(&motion)})).map_err(|e| StudioError::Motion(e.to_string()))?;
+        let timeline = inside(&m.timeline)?;
+        let mut docs = Vec::new();
         for (id, rel) in &m.images {
             let path = inside(rel)?;
             let doc = photocraft_format::load_path(&path).map_err(|e| io(&path, e))?;
-            let mut session = photocraft_engine::Session::new();
-            session.add_document(doc, None);
-            next.images.insert(AssetId(*id), session);
+            docs.push((AssetId(*id), doc));
         }
-        for a in next.assets.values() {
-            if a.kind == AssetKind::Image && !next.images.contains_key(&a.id) {
+        for a in &m.assets {
+            if a.kind == AssetKind::Image && !m.images.contains_key(&a.id.0) {
                 return Err(io(&mpath, format!("image asset {} has no file", a.id.0)));
             }
         }
-        // the nested sources must know every asset before the timeline asks for them
-        next.publish();
-        let timeline = inside(&m.timeline)?;
-        next.timeline.execute("file.open", json!({"path": s(&timeline)})).map_err(|e| StudioError::Timeline(e.to_string()))?;
-        next.project_path = Some(dir.to_path_buf());
-        next.journal = std::mem::take(&mut self.journal);
-        let summary = json!({"path": s(dir), "assets": next.assets.len(), "images": next.images.len()});
-        *self = next;
-        Ok(summary)
+        {
+            let mut probe = effectcraft_host::session();
+            probe.execute("file.open", json!({"path": s(&motion)})).map_err(|e| StudioError::Motion(format!("{}: {e}", motion.display())))?;
+            let mut probe = filmcraft_engine::Session::default();
+            probe.execute("file.open", json!({"path": s(&timeline)})).map_err(|e| StudioError::Timeline(format!("{}: {e}", timeline.display())))?;
+        }
+
+        // replace: images and assets first, so the timeline finds its nested sources
+        self.clear_images();
+        self.assets.clear();
+        self.next_asset = m.next_asset;
+        for a in &m.assets {
+            self.assets.insert(a.id, a.clone());
+        }
+        self.motion.execute("file.open", json!({"path": s(&motion)})).map_err(|e| StudioError::Motion(e.to_string()))?;
+        for (id, doc) in docs {
+            let i = self.images.add_document(doc, None);
+            if let Some(d) = self.images.documents().get(i) {
+                self.image_docs.insert(id, d.doc.id);
+            }
+        }
+        self.publish();
+        self.timeline.execute("file.open", json!({"path": s(&timeline)})).map_err(|e| StudioError::Timeline(e.to_string()))?;
+        self.project_path = Some(dir.to_path_buf());
+        self.undo.clear();
+        Ok(json!({"path": s(dir), "assets": self.assets.len(), "images": self.image_docs.len()}))
+    }
+
+    /// An empty project in the same engine sessions.
+    pub fn new_project(&mut self) -> Result<()> {
+        self.timeline.execute("file.newProject", json!({"name": "Untitled"})).map_err(|e| StudioError::Timeline(e.to_string()))?;
+        self.motion.execute("file.newProject", json!({})).map_err(|e| StudioError::Motion(e.to_string()))?;
+        self.clear_images();
+        self.assets.clear();
+        self.next_asset = 1;
+        self.project_path = None;
+        self.undo.clear();
+        self.publish();
+        Ok(())
+    }
+
+    /// Close every image document and forget the image assets' documents.
+    fn clear_images(&mut self) {
+        while !self.images.documents().is_empty() {
+            let last = self.images.documents().len() - 1;
+            if self.images.close(last).is_none() {
+                break;
+            }
+        }
+        self.image_docs.clear();
+        self.parked.clear();
     }
 }

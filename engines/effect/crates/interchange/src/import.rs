@@ -375,6 +375,11 @@ impl Importer<'_> {
                     let sid = self.solid(id, &it.name, color, w, h);
                     Some((LayerSource::Solid { item: sid }, (w, h), false))
                 }
+                // Studio: a nested composition or image of a VideoNow project has no file here
+                fp::MediaRef::Nested { uri } => {
+                    self.warn(format!("\"{}\" ({uri}) is nested in another engine and was left out", ti.name));
+                    None
+                }
             },
             fp::ItemKind::Sequence(s) => {
                 let nid = *self.items.get(&id)?;

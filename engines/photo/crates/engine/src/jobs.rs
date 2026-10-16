@@ -702,6 +702,10 @@ impl Session {
         self.jobs.spawn = false;
         self.coalesce_request = None;
         self.color_restrict = None;
+        // Studio: the keys of commands that ran (see param_audit)
+        if r.is_ok() {
+            crate::param_audit::record(id, &params);
+        }
         let pending = self.jobs.pending.take();
         match (r, pending) {
             (Err(e), Some(job)) => {

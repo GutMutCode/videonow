@@ -14,6 +14,7 @@ repository = "https://github.com/GutMutCode/videonow"
 # videonow
 videonow-core = { path = "crates/videonow-core" }
 videonow-automation = { path = "crates/videonow-automation" }
+videonow-cli = { path = "apps/videonow-cli" }
 # engines (vendored once, developed here from now on)
 effectcraft-automation = { path = "engines/effect/crates/automation" }
 effectcraft-av1enc = { path = "engines/effect/crates/av1enc" }
@@ -168,7 +169,7 @@ type_complexity = "allow"
 
 [profile.dev]
 opt-level = 1
-debug = "line-tables-only"
+debug = false
 
 [profile.dev.package."*"]
 opt-level = 2

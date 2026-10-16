@@ -30,15 +30,31 @@ pub struct Receipt {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub created: Vec<u64>,
     pub warnings: Vec<String>,
+    /// What the studio did to the request before running it (paths resolved inside the
+    /// session's folders, …).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
     /// What was verified (by the studio or the engine) around this command.
     pub checked: Vec<&'static str>,
     /// What nobody verified: look before relying on it.
     pub not_checked: Vec<&'static str>,
+    /// Checks a command made itself, added to `checked` when the receipt is finished.
+    #[serde(skip)]
+    pub extra_checked: Vec<&'static str>,
+}
+
+impl Receipt {
+    /// Record a check the command itself made (e.g. a saved file read back).
+    pub fn checked_extra(&mut self, what: &'static str) {
+        self.extra_checked.push(what);
+    }
 }
 
 /// What every engine command gets checked for.
-pub const ENGINE_CHECKED: &[&str] = &["command exists", "engine preconditions (enabled state)", "engine parameter parsing"];
-/// What the studio's own commands also check.
-pub const STUDIO_CHECKED: &[&str] = &["command exists", "unknown parameters rejected", "asset ids resolved"];
+pub const ENGINE_CHECKED: &[&str] = &["command exists", "delegation policy", "engine preconditions (enabled state)", "engine parameter parsing"];
+/// Engine commands whose unknown parameters are refused (by the studio or the engine).
+pub const STRICT_CHECKED: &str = "unknown parameters rejected";
+/// What the studio's own commands check.
+pub const STUDIO_CHECKED: &[&str] = &["command exists", "delegation policy", "unknown parameters rejected", "asset ids resolved"];
 /// What a command never verifies on its own.
 pub const NOT_CHECKED_VISUAL: &[&str] = &["the rendered picture (render a frame to look at it)"];

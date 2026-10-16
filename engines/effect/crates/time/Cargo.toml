@@ -9,7 +9,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-serde = { workspace = true }
+filmcraft-time = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -696,7 +696,7 @@ pub fn import_nested(s: &mut Session, uri: &str, name: &str, src: filmcraft_medi
             &name_s,
             label,
             ItemKind::Media(MediaClip {
-                media: MediaRef::File { path: uri_s },
+                media: MediaRef::Nested { uri: uri_s },
                 info,
                 interpret: Default::default(),
                 mark_in: None,
@@ -709,7 +709,7 @@ pub fn import_nested(s: &mut Session, uri: &str, name: &str, src: filmcraft_medi
             bin,
         ))
     })?;
-    s.media.insert_keyed(id, format!("file:{uri}"), src);
+    s.media.insert_keyed(id, format!("nested:{uri}"), src);
     Ok(id)
 }
 
@@ -4383,8 +4383,13 @@ fn schema_backup_path(path: &str, schema: u32) -> String {
 /// Make `proj` the session's project (fresh history, media pool and editor state).
 fn install_project(s: &mut Session, proj: filmcraft_project::Project, path: Option<String>, clean: bool) {
     let proxies = s.media.use_proxies();
+    // Studio: the resolver of nested compositions and images belongs to the session, not the project
+    let nested = s.media.nested_resolver();
     s.media = std::sync::Arc::new(crate::MediaPool::default());
     s.media.set_use_proxies(proxies);
+    if let Some(r) = nested {
+        s.media.set_nested_resolver(r);
+    }
     s.offline = Default::default();
     let first = proj.sequences().next().map(|i| i.id);
     s.project = std::sync::Arc::new(proj);

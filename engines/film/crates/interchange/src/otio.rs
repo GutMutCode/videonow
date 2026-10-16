@@ -236,6 +236,9 @@ impl Exp<'_, '_> {
                 "available_range": avail,
                 "metadata": {"filmcraft": {"item": item.0, "generator": g, "info": m.info}},
             }),
+            MediaRef::Nested { uri } => {
+                json!({"OTIO_SCHEMA": "MissingReference.1", "name": name, "available_range": avail, "metadata": {"filmcraft": {"item": item.0, "nested": uri, "info": m.info}}})
+            }
             MediaRef::File { path } => {
                 let url = match &self.opts.relative_to {
                     Some(base) => relative_path(path, base).unwrap_or_else(|| abs_url(path)),

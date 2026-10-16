@@ -423,6 +423,7 @@ pub fn cell(p: &Project, it: &ProjectItem, column: &str) -> (String, SortKey) {
         }),
         "File Path" => text(match media.map(|m| &m.media) {
             Some(MediaRef::File { path }) => path.clone(),
+            Some(MediaRef::Nested { uri }) => uri.clone(),
             _ => String::new(),
         }),
         "File Size" => match media.and_then(|m| m.info.file_size) {

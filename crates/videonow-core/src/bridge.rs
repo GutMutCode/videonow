@@ -75,7 +75,7 @@ pub fn image_for_motion(doc: &photocraft_doc::Document) -> MotionImage {
     MotionImage { width: w, height: h, data }
 }
 
-fn film_rate(r: effectcraft_time::FrameRate) -> FrameRate {
+pub(crate) fn film_rate(r: effectcraft_time::FrameRate) -> FrameRate {
     if r.num > 0 && r.den > 0 { FrameRate::new(r.num, r.den) } else { FrameRate::FPS_30 }
 }
 

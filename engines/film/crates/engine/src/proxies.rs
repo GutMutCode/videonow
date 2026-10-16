@@ -172,7 +172,7 @@ fn media_path(p: &Project, item: ItemId) -> Option<(MediaClip, String, String)> 
     let m = it.as_media()?;
     match &m.media {
         MediaRef::File { path } => Some((m.clone(), path.clone(), it.name.clone())),
-        MediaRef::Generator(_) => None,
+        MediaRef::Generator(_) | MediaRef::Nested { .. } => None,
     }
 }
 

@@ -28,6 +28,7 @@ mod marker_export;
 pub mod masks;
 pub mod media_browser;
 pub mod media_pool;
+mod param_audit;
 pub mod media_watch;
 pub mod mixer;
 pub mod multicam;
@@ -377,6 +378,9 @@ pub enum Event {
 }
 
 pub struct Session {
+    /// Studio: commands a hosting application refuses (VideoNow keeps the project file to
+    /// itself): `Some(alternative)` refuses the command with that hint. `None` runs everything.
+    pub host_guard: Option<fn(&str) -> Option<&'static str>>,
     pub project: Arc<Project>,
     pub history: History,
     pub revision: u64,
@@ -495,6 +499,7 @@ impl Default for Session {
 impl Session {
     pub fn new(services: Arc<dyn Services>) -> Self {
         Self {
+            host_guard: None,
             project: Arc::new(Project::new("Untitled")),
             history: History { limit: 200, ..Default::default() },
             revision: 1,
@@ -691,6 +696,10 @@ impl Session {
     /// Run a command by id.
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
         let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        // Studio: the hosting application's refusals
+        if let Some(alt) = self.host_guard.and_then(|g| g(id)) {
+            return Err(EngineError::Other(format!("`{id}` is not available here; use {alt}")));
+        }
         if self.exec_depth == 0 && spec.journal && self.trim_play.active() {
             self.settle_trim_playback(id);
         }
@@ -708,6 +717,10 @@ impl Session {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (spec.run)(self, &params)))
             .unwrap_or_else(|_| Err(EngineError::Other(format!("internal error in `{id}` (see the crash log); the command did not complete"))));
         self.exec_depth -= 1;
+        // Studio: the keys of commands that ran (see param_audit)
+        if r.is_ok() {
+            param_audit::record(id, &params);
+        }
         if self.exec_depth == 0 {
             source_monitor::track_history(self);
         }

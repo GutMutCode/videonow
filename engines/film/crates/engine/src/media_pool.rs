@@ -92,6 +92,7 @@ pub fn media_key(m: &MediaClip) -> String {
         MediaRef::File { path } if m.offline => format!("offline:{path}"),
         MediaRef::File { path } => format!("file:{path}"),
         MediaRef::Generator(g) => format!("generator:{g:?}"),
+        MediaRef::Nested { uri } => format!("nested:{uri}"),
     }
 }
 
@@ -155,13 +156,19 @@ impl MediaPool {
         *self.nested.write().unwrap_or_else(|e| e.into_inner()) = Some(r);
     }
 
+    /// Studio: the resolver for `studio://` references, to carry over to a new pool (opening a
+    /// project replaces the pool).
+    pub fn nested_resolver(&self) -> Option<NestedResolver> {
+        self.nested.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     /// Studio: the live source of a `studio://` reference, if a resolver knows it.
-    pub fn resolve_nested(&self, path: &str) -> Option<SharedSource> {
-        if !path.starts_with(NESTED_SCHEME) {
+    pub fn resolve_nested(&self, uri: &str) -> Option<SharedSource> {
+        if !uri.starts_with(NESTED_SCHEME) {
             return None;
         }
         let r = self.nested.read().unwrap_or_else(|e| e.into_inner()).clone()?;
-        r(path)
+        r(uri)
     }
 
     pub fn register_opener(&self, o: Opener) {
@@ -294,15 +301,19 @@ impl MediaPool {
         {
             return Some(s.clone());
         }
-        // Studio: a composition or image document of the same project renders live
-        if let MediaRef::File { path } = &m.media
-            && let Some(src) = self.resolve_nested(path)
-        {
-            self.offline.write().unwrap_or_else(|e| e.into_inner()).remove(&item);
-            self.sources.write().unwrap_or_else(|e| e.into_inner()).insert(item, (key, src.clone()));
-            return Some(src);
-        }
         let src: SharedSource = match &m.media {
+            // Studio: a composition or image document of the same project renders live; one the
+            // project no longer has shows the offline slate (and is reported as missing)
+            MediaRef::Nested { uri } => match self.resolve_nested(uri) {
+                Some(src) => {
+                    self.offline.write().unwrap_or_else(|e| e.into_inner()).remove(&item);
+                    src
+                }
+                None => {
+                    self.set_offline(item, OfflineReason::Missing, uri, "the nested composition or image is not in this project");
+                    Arc::new(SlateSource::new(m.info.clone(), &it.name, OfflineReason::Missing))
+                }
+            },
             MediaRef::Generator(g) => {
                 let v = m.info.video.as_ref();
                 let (w, h, r) = v.map(|v| (v.width, v.height, v.frame_rate)).unwrap_or((1920, 1080, Default::default()));

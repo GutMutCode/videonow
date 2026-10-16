@@ -385,6 +385,9 @@ pub enum Event {
 }
 
 pub struct Session {
+    /// Studio: commands a hosting application refuses (VideoNow keeps the project file to
+    /// itself): `Some(alternative)` refuses the command with that hint. `None` runs everything.
+    pub host_guard: Option<fn(&str) -> Option<&'static str>>,
     pub project: Arc<Project>,
     pub history: History,
     pub revision: u64,
@@ -548,6 +551,7 @@ impl Default for Session {
     fn default() -> Self {
         let project = Arc::new(Project::default());
         Session {
+            host_guard: None,
             saved_project: project.clone(),
             project,
             history: History::default(),
@@ -623,6 +627,10 @@ impl Session {
     /// Run a command by id.
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
         let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        // Studio: the hosting application's refusals
+        if let Some(alt) = self.host_guard.and_then(|g| g(id)) {
+            return Err(EngineError::Other(format!("`{id}` is not available here; use {alt}")));
+        }
         if let Err(why) = (spec.enabled)(self) {
             // Explicit targets (agents, scripts) don't need a UI selection.
             let explicit = (["layer", "layers", "prop", "keys"].iter().any(|k| params.get(k).is_some()) && commands::has_comp(self).is_ok())

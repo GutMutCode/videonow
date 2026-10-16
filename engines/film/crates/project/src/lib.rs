@@ -162,6 +162,11 @@ pub enum MediaRef {
     File { path: String },
     /// A synthetic generator (Bars and Tone, Color Matte, demo footage…).
     Generator(Generator),
+    /// Studio: a document of another engine of the same project (a composition or an image),
+    /// named by a `studio://<kind>/<asset>` reference and rendered live by that engine through
+    /// the media pool's nested resolver. Never a file: relinking, proxies, media watching and
+    /// collecting skip it.
+    Nested { uri: String },
 }
 
 /// Overrides applied when interpreting footage (Modify ▸ Interpret Footage).

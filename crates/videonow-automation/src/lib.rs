@@ -2,20 +2,28 @@
 //!
 //! | Tool | What it does |
 //! |---|---|
-//! | `command_list` | every command of every engine, with its effect class (`read`, `edit`, `destructive`, `fileWrite`) |
+//! | `command_list` | every command of every engine, with its effect class (`read`, `edit`, `destructive`, `fileWrite`, `external`) |
 //! | `command_run` | run one command; the reply carries its result and its receipt |
 //! | `command_batch` | run several in order; stops at the first error unless told not to |
 //! | `doc_inspect` | the whole project: sequence, compositions, images, assets |
 //! | `render_preview` | a PNG of the active sequence at a time (reads only) |
 //!
-//! The studio lives on one worker thread (the engines are not shared between threads); tool calls
-//! reach it through a channel, one at a time, in the order they arrive.
+//! The tools run against one of two backends:
+//!
+//! * **its own studio** (`videonow mcp`): a headless studio on a worker thread (the engines are not
+//!   shared between threads); tool calls reach it through a channel, one at a time.
+//! * **the desktop app** (`videonow mcp --bridge`): the studio a person has open. Tool calls go
+//!   over the app's control channel (localhost, token-authenticated, see [`bridge`]) and show up in
+//!   its AI panel, where the person may have to approve them.
+//!
+//! Both answer the same [`control::Request`]s, so a tool behaves the same either way.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+pub mod bridge;
+
 use std::sync::mpsc;
 
-use base64::Engine as _;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock as Content};
@@ -23,7 +31,8 @@ use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt, tool, tool_handler,
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use videonow_core::Studio;
+use videonow_core::control::{self, Request};
+use videonow_core::{Policy, Studio};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AutomationError {
@@ -42,10 +51,15 @@ struct Worker {
 }
 
 impl Worker {
-    fn spawn() -> Self {
+    fn spawn(policy: Policy, project: Option<std::path::PathBuf>) -> Self {
         let (tx, rx) = mpsc::channel::<Job>();
         std::thread::spawn(move || {
-            let mut studio = Studio::new();
+            let mut studio = Studio::with_policy(policy);
+            if let Some(p) = project
+                && let Err(e) = studio.execute("studio:project.open", json!({"path": p.to_string_lossy()}))
+            {
+                eprintln!("videonow: {e}");
+            }
             while let Ok(job) = rx.recv() {
                 // a panic in one command must not take the session down (never-crash rule)
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&mut studio)));
@@ -68,9 +82,35 @@ impl Worker {
     }
 }
 
+/// Where tool calls run.
+#[derive(Clone)]
+enum Backend {
+    Local(Worker),
+    Bridge(bridge::Client),
+}
+
+impl Backend {
+    /// Run one request; `Err` carries the message for the agent.
+    async fn run(&self, req: Request) -> Result<Value, String> {
+        match self {
+            Backend::Local(w) => match w.call(move |s| control::handle(s, &req).map_err(|e| e.to_string())).await {
+                Ok(r) => r,
+                Err(e) => Err(e.to_string()),
+            },
+            Backend::Bridge(c) => {
+                let c = c.clone();
+                match tokio::task::spawn_blocking(move || c.request(&req)).await {
+                    Ok(r) => r,
+                    Err(e) => Err(format!("bridge: {e}")),
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct StudioMcp {
-    worker: Worker,
+    backend: Backend,
     tool_router: ToolRouter<Self>,
 }
 
@@ -134,15 +174,17 @@ fn fail(e: impl std::fmt::Display) -> CallToolResult {
 
 const INSTRUCTIONS: &str = "VideoNow: one video project across three engines. `timeline:` commands edit sequences (FilmCraft), \
 `motion:` commands edit compositions (EffectCraft; pass a composition `asset`), `image:` commands edit image documents \
-(PhotoCraft; pass an image `asset`), `studio:` commands create assets and connect them (`studio:comp.new`, `studio:image.new`, \
-`studio:image.toComp`, `studio:asset.place`). Every reply carries a receipt: what changed, revisions, what was checked and \
-what was not. Look at `render_preview` before claiming a visual result.";
+(PhotoCraft; pass an image `asset`), `studio:` commands create assets, connect them and handle the project file \
+(`studio:comp.new`, `studio:image.new`, `studio:image.toComp`, `studio:asset.place`, `studio:project.save`, `studio:project.open`). \
+Every reply carries a receipt: what changed, revisions, what was checked and what was not. Look at `render_preview` before \
+claiming a visual result. `studio:describe {id}` explains one command; `studio:policy` says what this session may do \
+(commands outside it are refused before they run: ask the person instead).";
 
 #[tool_router]
 impl StudioMcp {
     #[tool(
         title = "List commands",
-        description = "Every command of every engine: id (`domain:command`), label, parameter doc, and effect class (read, edit, destructive, fileWrite; `basis` says whether the class is declared or inferred).",
+        description = "Every command of every engine: id (`domain:command`), label, parameter doc, and effect class (read, edit, destructive, fileWrite, external; `basis` says whether the class is declared or inferred).",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn command_list(&self, Parameters(p): Parameters<ListParams>) -> Result<CallToolResult, McpError> {
@@ -153,10 +195,9 @@ impl StudioMcp {
         if let Some(d) = p.domain {
             q.insert("domain".into(), json!(d));
         }
-        let r = self.worker.call(move |s| s.execute("studio:commands", Value::Object(q)).map(|v| v["result"].clone())).await;
+        let r = self.backend.run(Request::Execute { id: "studio:commands".into(), params: Value::Object(q) }).await;
         Ok(match r {
-            Ok(Ok(v)) => ok_json(&v),
-            Ok(Err(e)) => fail(e),
+            Ok(v) => ok_json(&v["result"]),
             Err(e) => fail(e),
         })
     }
@@ -167,10 +208,9 @@ impl StudioMcp {
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false)
     )]
     async fn command_run(&self, Parameters(p): Parameters<RunParams>) -> Result<CallToolResult, McpError> {
-        let r = self.worker.call(move |s| s.execute(&p.id, p.params.unwrap_or(Value::Null))).await;
+        let r = self.backend.run(Request::Execute { id: p.id, params: p.params.unwrap_or(Value::Null) }).await;
         Ok(match r {
-            Ok(Ok(v)) => ok_json(&v),
-            Ok(Err(e)) => fail(e),
+            Ok(v) => ok_json(&v),
             Err(e) => fail(e),
         })
     }
@@ -181,29 +221,8 @@ impl StudioMcp {
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false)
     )]
     async fn command_batch(&self, Parameters(p): Parameters<BatchParams>) -> Result<CallToolResult, McpError> {
-        let stop = p.stop_on_error.unwrap_or(true);
-        let r = self
-            .worker
-            .call(move |s| {
-                let (mut completed, mut failed, mut results) = (0u32, 0u32, Vec::new());
-                for st in p.steps {
-                    match s.execute(&st.id, st.params.unwrap_or(Value::Null)) {
-                        Ok(v) => {
-                            completed += 1;
-                            results.push(json!({"ok": true, "id": st.id, "result": v["result"], "receipt": v["receipt"]}));
-                        }
-                        Err(e) => {
-                            failed += 1;
-                            results.push(json!({"ok": false, "id": st.id, "error": e.to_string()}));
-                            if stop {
-                                break;
-                            }
-                        }
-                    }
-                }
-                json!({"completed": completed, "failed": failed, "results": results})
-            })
-            .await;
+        let steps = p.steps.into_iter().map(|st| (st.id, st.params.unwrap_or(Value::Null))).collect();
+        let r = self.backend.run(Request::Batch { steps, stop_on_error: p.stop_on_error.unwrap_or(true) }).await;
         Ok(match r {
             Ok(v) if v["failed"].as_u64().unwrap_or(0) > 0 => CallToolResult::error(vec![Content::text(v.to_string())]),
             Ok(v) => ok_json(&v),
@@ -217,10 +236,9 @@ impl StudioMcp {
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn doc_inspect(&self) -> Result<CallToolResult, McpError> {
-        let r = self.worker.call(|s| s.execute("studio:inspect", json!({})).map(|v| v["result"].clone())).await;
+        let r = self.backend.run(Request::Execute { id: "studio:inspect".into(), params: json!({}) }).await;
         Ok(match r {
-            Ok(Ok(v)) => ok_json(&v),
-            Ok(Err(e)) => fail(e),
+            Ok(v) => ok_json(&v["result"]),
             Err(e) => fail(e),
         })
     }
@@ -231,42 +249,34 @@ impl StudioMcp {
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn render_preview(&self, Parameters(p): Parameters<PreviewParams>) -> Result<CallToolResult, McpError> {
-        let secs = p.seconds.unwrap_or(0.0);
-        let max_side = p.max_side.unwrap_or(960).clamp(16, 4096);
-        let r = self
-            .worker
-            .call(move |s| {
-                let full = s.timeline.active_sequence().map(|q| q.settings.width.max(q.settings.height)).unwrap_or(1920).max(1);
-                let scale = (f64::from(max_side) / f64::from(full)).min(1.0);
-                s.render_rgba(secs, scale)
-            })
-            .await;
+        let r = self.backend.run(Request::Preview { seconds: p.seconds.unwrap_or(0.0), max_side: p.max_side.unwrap_or(960).clamp(16, 4096) }).await;
         Ok(match r {
-            Ok(Ok((w, h, rgba, offline))) => {
-                let mut png = Vec::new();
-                match image::write_buffer_with_format(&mut std::io::Cursor::new(&mut png), &rgba, w, h, image::ExtendedColorType::Rgba8, image::ImageFormat::Png) {
-                    Ok(()) => {
-                        let note = if offline.is_empty() { format!("{w}x{h} at {secs}s") } else { format!("{w}x{h} at {secs}s; offline (slate): {}", offline.join(", ")) };
-                        CallToolResult::success(vec![Content::image(base64::engine::general_purpose::STANDARD.encode(&png), "image/png"), Content::text(note)])
-                    }
-                    Err(e) => fail(e),
-                }
+            Ok(v) => {
+                let (w, h, secs) = (v["width"].as_u64().unwrap_or(0), v["height"].as_u64().unwrap_or(0), v["seconds"].as_f64().unwrap_or(0.0));
+                let offline: Vec<&str> = v["offline"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+                let note = if offline.is_empty() { format!("{w}x{h} at {secs}s") } else { format!("{w}x{h} at {secs}s; offline (slate): {}", offline.join(", ")) };
+                CallToolResult::success(vec![Content::image(v["png"].as_str().unwrap_or_default().to_string(), "image/png"), Content::text(note)])
             }
-            Ok(Err(e)) => fail(e),
             Err(e) => fail(e),
         })
     }
 }
 
 impl StudioMcp {
-    pub fn new() -> Self {
-        Self { worker: Worker::spawn(), tool_router: Self::tool_router() }
+    /// A server over a new studio limited by `policy`, with `project` opened first.
+    pub fn new(policy: Policy, project: Option<std::path::PathBuf>) -> Self {
+        Self { backend: Backend::Local(Worker::spawn(policy, project)), tool_router: Self::tool_router() }
+    }
+
+    /// A server that forwards every tool call to a running desktop app.
+    pub fn bridged(client: bridge::Client) -> Self {
+        Self { backend: Backend::Bridge(client), tool_router: Self::tool_router() }
     }
 }
 
 impl Default for StudioMcp {
     fn default() -> Self {
-        Self::new()
+        Self::new(Policy::default(), None)
     }
 }
 
@@ -279,11 +289,20 @@ impl ServerHandler for StudioMcp {
     }
 }
 
-/// Serve MCP on stdin/stdout until the client disconnects.
-pub fn serve_stdio() -> Result<(), AutomationError> {
+/// Serve MCP on stdin/stdout until the client disconnects, over a headless studio.
+pub fn serve_stdio(policy: Policy, project: Option<std::path::PathBuf>) -> Result<(), AutomationError> {
+    serve(StudioMcp::new(policy, project))
+}
+
+/// Serve MCP on stdin/stdout, forwarding to the desktop app.
+pub fn serve_bridge(client: bridge::Client) -> Result<(), AutomationError> {
+    serve(StudioMcp::bridged(client))
+}
+
+fn serve(server: StudioMcp) -> Result<(), AutomationError> {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| AutomationError::Io(e.to_string()))?;
     rt.block_on(async {
-        let service = StudioMcp::new().serve((tokio::io::stdin(), tokio::io::stdout())).await.map_err(|e| AutomationError::Io(e.to_string()))?;
+        let service = server.serve((tokio::io::stdin(), tokio::io::stdout())).await.map_err(|e| AutomationError::Io(e.to_string()))?;
         service.waiting().await.map_err(|e| AutomationError::Io(e.to_string()))?;
         Ok(())
     })

@@ -203,6 +203,7 @@ pub fn check_candidate(s: &Session, item: ItemId, path: &str, o: &MatchOptions) 
     let old = match &m.media {
         MediaRef::File { path } => path.clone(),
         MediaRef::Generator(_) => return Err(bad("media.relink", "generated media has no file to link")),
+        MediaRef::Nested { .. } => return Err(bad("media.relink", "a nested composition or image has no file to link")),
     };
     let mut c = Candidate { path: path.to_string(), ..Default::default() };
     let (on, oe) = split_ext(file_name(&old));
@@ -573,9 +574,13 @@ fn status_json(s: &Session, id: ItemId) -> Option<Value> {
     let m = it.as_media()?;
     let path = match &m.media {
         MediaRef::File { path } => Some(path.clone()),
-        MediaRef::Generator(_) => None,
+        MediaRef::Generator(_) | MediaRef::Nested { .. } => None,
     };
     let status = match &path {
+        None if matches!(m.media, MediaRef::Nested { .. }) => match s.media.offline_status(id) {
+            Some(_) => "missing",
+            None => "nested",
+        },
         None => "generated",
         Some(_) if m.offline => "offline",
         Some(p) if s.services.file_size(p).is_err() => "missing",

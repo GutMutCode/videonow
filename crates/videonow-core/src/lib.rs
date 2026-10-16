@@ -17,13 +17,23 @@
 
 pub mod assets;
 pub mod bridge;
+pub mod control;
+pub mod demo;
 pub mod manifest;
+pub mod params;
+mod params_extra;
+pub mod policy;
 pub mod receipt;
 mod studio;
 
 pub use assets::{Asset, AssetId, AssetKind};
+pub use manifest::Effect;
+pub use policy::Policy;
 pub use receipt::Receipt;
 pub use studio::Studio;
+pub use studio::project_file;
+/// For applications that host the engines' own UIs on the studio's sessions.
+pub use studio::ui as host;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StudioError {
@@ -41,6 +51,12 @@ pub enum StudioError {
     Motion(String),
     #[error("image: {0}")]
     Image(String),
+    /// Refused by the session's delegation policy (see [`policy`]); nothing ran.
+    #[error("policy: {0}")]
+    Policy(String),
+    /// An engine command the studio does not run, and what to use instead; nothing ran.
+    #[error("`{0}` is not available in VideoNow: it would cut one engine's document loose from the project. Use `{1}` instead")]
+    Reserved(String, &'static str),
     #[error("{0}")]
     Other(String),
 }

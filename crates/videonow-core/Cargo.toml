@@ -13,6 +13,7 @@ filmcraft-media = { workspace = true }
 filmcraft-frame = { workspace = true }
 filmcraft-time = { workspace = true }
 filmcraft-color = { workspace = true }
+filmcraft-format = { workspace = true }
 # motion (EffectCraft)
 effectcraft-host = { workspace = true }
 effectcraft-engine = { workspace = true }
@@ -27,12 +28,15 @@ effectcraft-model = { workspace = true }
 photocraft-engine = { workspace = true }
 photocraft-doc = { workspace = true }
 photocraft-compose = { workspace = true }
+photocraft-format = { workspace = true }
+photocraft-io = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 image = { workspace = true }
+base64 = "0.22"
 
 [lints]
 workspace = true

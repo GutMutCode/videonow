@@ -24,7 +24,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock as Content};
 use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use videonow_core::{Policy, Studio};
 
@@ -83,9 +83,12 @@ impl Worker {
 pub struct StudioMcp {
     worker: Worker,
     tool_router: ToolRouter<Self>,
+    /// Every tool call, one JSON line each (`--log`): what an agent session did, errors and
+    /// reads included, for review and for scoring (`videonow-eval score`).
+    log: Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>>,
 }
 
-#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListParams {
     /// Only commands whose id or label contains this text (case-insensitive).
@@ -96,7 +99,7 @@ pub struct ListParams {
     pub domain: Option<String>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RunParams {
     /// `domain:command`, e.g. `studio:comp.new`, `motion:layer.newText`, `timeline:timeline.place`.
@@ -105,9 +108,20 @@ pub struct RunParams {
     /// optional composition `asset`; `image:` commands need an image `asset`.
     #[serde(default)]
     pub params: Option<Value>,
+    /// Your id for this request. Sending the same request again (say the reply was lost) returns
+    /// the first answer instead of doing the work twice (`receipt.replayed`).
+    #[serde(default)]
+    pub request_id: Option<String>,
+    /// Refuse unless the project is at this revision (from doc_inspect or the last receipt):
+    /// someone may have changed it since you looked.
+    #[serde(default)]
+    pub expect_revision: Option<u64>,
+    /// Run, report what would change, take it back.
+    #[serde(default)]
+    pub dry_run: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
     pub id: String,
@@ -115,17 +129,24 @@ pub struct Step {
     pub params: Option<Value>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BatchParams {
+    /// Steps in order. A string `"$0.asset"` in a step's params is replaced by step 0's
+    /// `result.asset` (any path; steps count from 0).
     pub steps: Vec<Step>,
-    /// Stop at the first failing step (default true). Steps that ran stay applied: this is not a
-    /// transaction (`studio:undo` once per changed step rolls them back).
+    /// All or nothing (default true): when a step fails, the steps before it are taken back.
     #[serde(default)]
-    pub stop_on_error: Option<bool>,
+    pub atomic: Option<bool>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub expect_revision: Option<u64>,
+    #[serde(default)]
+    pub dry_run: Option<bool>,
 }
 
-#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewParams {
     /// Sequence time in seconds (default 0).
@@ -134,6 +155,10 @@ pub struct PreviewParams {
     /// Longest side of the PNG in pixels (default 960, at most the sequence size).
     #[serde(default)]
     pub max_side: Option<u32>,
+    /// Preview a change without keeping it: these steps run, the frame is rendered, and
+    /// everything is taken back.
+    #[serde(default)]
+    pub steps: Option<Vec<Step>>,
 }
 
 fn ok_json(v: &Value) -> CallToolResult {
@@ -157,6 +182,7 @@ impl StudioMcp {
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn command_list(&self, Parameters(p): Parameters<ListParams>) -> Result<CallToolResult, McpError> {
+        let (t0, args) = (std::time::Instant::now(), serde_json::to_value(&p).unwrap_or(Value::Null));
         let mut q = serde_json::Map::new();
         if let Some(f) = p.filter {
             q.insert("filter".into(), json!(f));
@@ -165,7 +191,7 @@ impl StudioMcp {
             q.insert("domain".into(), json!(d));
         }
         let r = self.worker.call(move |s| s.execute("studio:commands", Value::Object(q)).map(|v| v["result"].clone())).await;
-        Ok(match r {
+        self.finish("command_list", args, t0, match r {
             Ok(Ok(v)) => ok_json(&v),
             Ok(Err(e)) => fail(e),
             Err(e) => fail(e),
@@ -174,12 +200,14 @@ impl StudioMcp {
 
     #[tool(
         title = "Run a command",
-        description = "Run one command: {\"id\":\"studio:comp.new\",\"params\":{\"name\":\"Title\"}}. The reply is {result, receipt}; the receipt lists what changed, the revisions, what was checked and what was not.",
+        description = "Run one command: {\"id\":\"studio:comp.new\",\"params\":{\"name\":\"Title\"}}. The reply is {result, receipt}; the receipt lists what changed, the revisions, what was checked and what was not. Optional: request_id (a retry returns the first answer), expect_revision (refused if the project changed since), dry_run (report and take back).",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false)
     )]
     async fn command_run(&self, Parameters(p): Parameters<RunParams>) -> Result<CallToolResult, McpError> {
-        let r = self.worker.call(move |s| s.execute(&p.id, p.params.unwrap_or(Value::Null))).await;
-        Ok(match r {
+        let (t0, args) = (std::time::Instant::now(), serde_json::to_value(&p).unwrap_or(Value::Null));
+        let req = videonow_core::Request { request_id: p.request_id, expect_revision: p.expect_revision, dry_run: p.dry_run.unwrap_or(false) };
+        let r = self.worker.call(move |s| s.execute_with(&p.id, p.params.unwrap_or(Value::Null), &req)).await;
+        self.finish("command_run", args, t0, match r {
             Ok(Ok(v)) => ok_json(&v),
             Ok(Err(e)) => fail(e),
             Err(e) => fail(e),
@@ -188,36 +216,18 @@ impl StudioMcp {
 
     #[tool(
         title = "Run several commands",
-        description = "Run commands in order: {steps: [{id, params?}], stop_on_error?: true}. Returns {completed, failed, results}. Not a transaction: steps that ran stay applied.",
+        description = "Run commands in order as one change: {steps: [{id, params?}], atomic?: true}. With atomic (the default) a failing step takes back the ones before it. \"$0.asset\" in a step's params is step 0's result.asset. Optional request_id, expect_revision, dry_run as for command_run. Returns {completed, results, receipt}.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false)
     )]
     async fn command_batch(&self, Parameters(p): Parameters<BatchParams>) -> Result<CallToolResult, McpError> {
-        let stop = p.stop_on_error.unwrap_or(true);
-        let r = self
-            .worker
-            .call(move |s| {
-                let (mut completed, mut failed, mut results) = (0u32, 0u32, Vec::new());
-                for st in p.steps {
-                    match s.execute(&st.id, st.params.unwrap_or(Value::Null)) {
-                        Ok(v) => {
-                            completed += 1;
-                            results.push(json!({"ok": true, "id": st.id, "result": v["result"], "receipt": v["receipt"]}));
-                        }
-                        Err(e) => {
-                            failed += 1;
-                            results.push(json!({"ok": false, "id": st.id, "error": e.to_string()}));
-                            if stop {
-                                break;
-                            }
-                        }
-                    }
-                }
-                json!({"completed": completed, "failed": failed, "results": results})
-            })
-            .await;
-        Ok(match r {
-            Ok(v) if v["failed"].as_u64().unwrap_or(0) > 0 => CallToolResult::error(vec![Content::text(v.to_string())]),
-            Ok(v) => ok_json(&v),
+        let (t0, args) = (std::time::Instant::now(), serde_json::to_value(&p).unwrap_or(Value::Null));
+        let req = videonow_core::Request { request_id: p.request_id, expect_revision: p.expect_revision, dry_run: p.dry_run.unwrap_or(false) };
+        let steps: Vec<(String, Value)> = p.steps.into_iter().map(|st| (st.id, st.params.unwrap_or(json!({})))).collect();
+        let atomic = p.atomic.unwrap_or(true);
+        let r = self.worker.call(move |s| s.batch(steps, atomic, &req)).await;
+        self.finish("command_batch", args, t0, match r {
+            Ok(Ok(v)) => ok_json(&v),
+            Ok(Err(e)) => fail(e),
             Err(e) => fail(e),
         })
     }
@@ -228,8 +238,9 @@ impl StudioMcp {
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn doc_inspect(&self) -> Result<CallToolResult, McpError> {
+        let (t0, args) = (std::time::Instant::now(), json!({}));
         let r = self.worker.call(|s| s.execute("studio:inspect", json!({})).map(|v| v["result"].clone())).await;
-        Ok(match r {
+        self.finish("doc_inspect", args, t0, match r {
             Ok(Ok(v)) => ok_json(&v),
             Ok(Err(e)) => fail(e),
             Err(e) => fail(e),
@@ -238,21 +249,29 @@ impl StudioMcp {
 
     #[tool(
         title = "Render a preview",
-        description = "A PNG of the active sequence at `seconds` (compositions and images on it render live). Reads only; names any offline media drawn as a slate.",
+        description = "A PNG of the active sequence at `seconds` (compositions and images on it render live). Reads only; names any offline media drawn as a slate. With `steps`, shows what those commands would do and keeps nothing.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn render_preview(&self, Parameters(p): Parameters<PreviewParams>) -> Result<CallToolResult, McpError> {
+        let (t0, args) = (std::time::Instant::now(), serde_json::to_value(&p).unwrap_or(Value::Null));
         let secs = p.seconds.unwrap_or(0.0);
         let max_side = p.max_side.unwrap_or(960).clamp(16, 4096);
+        let steps: Option<Vec<(String, Value)>> = p.steps.map(|v| v.into_iter().map(|st| (st.id, st.params.unwrap_or(json!({})))).collect());
         let r = self
             .worker
             .call(move |s| {
-                let full = s.timeline.active_sequence().map(|q| q.settings.width.max(q.settings.height)).unwrap_or(1920).max(1);
-                let scale = (f64::from(max_side) / f64::from(full)).min(1.0);
-                s.render_rgba(secs, scale)
+                let look = move |s: &mut Studio| {
+                    let full = s.timeline.active_sequence().map(|q| q.settings.width.max(q.settings.height)).unwrap_or(1920).max(1);
+                    let scale = (f64::from(max_side) / f64::from(full)).min(1.0);
+                    s.render_rgba(secs, scale)
+                };
+                match steps {
+                    Some(steps) => s.preview_with(steps, look).and_then(|(r, _)| r),
+                    None => look(s),
+                }
             })
             .await;
-        Ok(match r {
+        self.finish("render_preview", args, t0, match r {
             Ok(Ok((w, h, rgba, offline))) => {
                 let mut png = Vec::new();
                 match image::write_buffer_with_format(&mut std::io::Cursor::new(&mut png), &rgba, w, h, image::ExtendedColorType::Rgba8, image::ImageFormat::Png) {
@@ -272,13 +291,39 @@ impl StudioMcp {
 impl StudioMcp {
     /// A server whose studio enforces `policy` (see `videonow_core::policy`).
     pub fn new(policy: Policy) -> Self {
-        Self { worker: Worker::spawn(policy), tool_router: Self::tool_router() }
+        Self { worker: Worker::spawn(policy), tool_router: Self::tool_router(), log: None }
+    }
+
+    /// Append every tool call to `path` as a JSON line.
+    pub fn with_log(mut self, path: &std::path::Path) -> Result<Self, AutomationError> {
+        let f = std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e| AutomationError::Io(format!("{}: {e}", path.display())))?;
+        self.log = Some(std::sync::Arc::new(std::sync::Mutex::new(f)));
+        Ok(self)
+    }
+
+    fn finish(&self, tool: &str, args: Value, t0: std::time::Instant, r: CallToolResult) -> Result<CallToolResult, McpError> {
+        if let Some(log) = &self.log {
+            let text: String = r.content.iter().filter_map(|c| c.as_text().map(|t| t.text.clone())).collect::<Vec<_>>().join("\n");
+            let line = json!({
+                "tool": tool,
+                "args": args,
+                "ok": !r.is_error.unwrap_or(false),
+                "ms": t0.elapsed().as_millis() as u64,
+                "reply": text.chars().take(4000).collect::<String>(),
+                "images": r.content.iter().filter(|c| c.as_image().is_some()).count(),
+            });
+            if let Ok(mut f) = log.lock() {
+                use std::io::Write as _;
+                let _ = writeln!(f, "{line}");
+            }
+        }
+        Ok(r)
     }
 
     /// A server for a studio another thread owns: tool calls become [`Job`]s on `tx`, and
     /// `wake` is called after each one is queued.
     pub fn attach(tx: mpsc::Sender<Job>, wake: Option<Wake>) -> Self {
-        Self { worker: Worker { tx, wake }, tool_router: Self::tool_router() }
+        Self { worker: Worker { tx, wake }, tool_router: Self::tool_router(), log: None }
     }
 }
 
@@ -381,10 +426,14 @@ impl ServerHandler for StudioMcp {
 }
 
 /// Serve MCP on stdin/stdout until the client disconnects.
-pub fn serve_stdio(policy: Policy) -> Result<(), AutomationError> {
+pub fn serve_stdio(policy: Policy, log: Option<&std::path::Path>) -> Result<(), AutomationError> {
+    let server = match log {
+        Some(p) => StudioMcp::new(policy).with_log(p)?,
+        None => StudioMcp::new(policy),
+    };
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| AutomationError::Io(e.to_string()))?;
     rt.block_on(async {
-        let service = StudioMcp::new(policy).serve((tokio::io::stdin(), tokio::io::stdout())).await.map_err(|e| AutomationError::Io(e.to_string()))?;
+        let service = server.serve((tokio::io::stdin(), tokio::io::stdout())).await.map_err(|e| AutomationError::Io(e.to_string()))?;
         service.waiting().await.map_err(|e| AutomationError::Io(e.to_string()))?;
         Ok(())
     })

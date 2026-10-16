@@ -29,6 +29,9 @@ pub const MANIFEST: &str = "manifest.json";
 pub const TIMELINE_FILE: &str = "timeline.fcproj";
 pub const MOTION_FILE: &str = "motion.ecproj";
 pub const IMAGES_DIR: &str = "images";
+/// Every change so far, with its receipt (what the project went through; read by people, agents
+/// and the evaluation's scorer).
+pub const JOURNAL: &str = "journal.json";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -104,6 +107,9 @@ impl Studio {
             motion: MOTION_FILE.into(),
             images,
         };
+        let journal = serde_json::to_vec_pretty(&self.journal).map_err(|e| StudioError::Other(e.to_string()))?;
+        let jpath = dir.join(JOURNAL);
+        photocraft_format::atomic_write(&jpath, &journal).map_err(|e| io(&jpath, e))?;
         let text = serde_json::to_vec_pretty(&manifest).map_err(|e| StudioError::Other(e.to_string()))?;
         let mpath = dir.join(MANIFEST);
         photocraft_format::atomic_write(&mpath, &text).map_err(|e| io(&mpath, e))?;
@@ -174,6 +180,12 @@ impl Studio {
         self.timeline.execute("file.open", json!({"path": s(&timeline)})).map_err(|e| StudioError::Timeline(e.to_string()))?;
         self.project_path = Some(dir.to_path_buf());
         self.undo.clear();
+        // the project's own history replaces this session's; revisions keep counting up
+        if let Some(j) = std::fs::read(dir.join(JOURNAL)).ok().and_then(|b| serde_json::from_slice::<Vec<Value>>(&b).ok()) {
+            let top = j.iter().filter_map(|e| e["receipt"]["revision"]["after"].as_u64()).max().unwrap_or(0);
+            self.revision = self.revision.max(top);
+            self.journal = j;
+        }
         Ok(json!({"path": s(dir), "assets": self.assets.len(), "images": self.image_docs.len()}))
     }
 

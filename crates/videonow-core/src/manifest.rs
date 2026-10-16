@@ -195,6 +195,13 @@ pub const STUDIO_COMMANDS: &[StudioCommand] = &[
     },
     StudioCommand { id: "project.new", effect: Effect::Destructive, params: "{}", keys: &[], summary: "Start an empty project (unsaved changes are lost)." },
     StudioCommand { id: "undo", effect: Effect::Edit, params: "{}", keys: &[], summary: "Undo the last change, in whichever engine made it." },
+    StudioCommand {
+        id: "batch",
+        effect: Effect::Edit,
+        params: r#"{"steps":[{"id":str,"params":{…}}],"atomic":bool=true}"#,
+        keys: &["steps", "atomic"],
+        summary: "Run several commands as one change: if a step fails the earlier ones are taken back (atomic). A string \"$0.asset\" in a step is replaced by step 0's result.asset. Each step is checked like a command of its own.",
+    },
 ];
 
 /// The effect class of `domain:cmd`, if the command exists.
@@ -210,6 +217,52 @@ pub fn effect_of(domain: &str, cmd: &str) -> Option<Effect> {
 
 pub fn studio_command(id: &str) -> Option<&'static StudioCommand> {
     STUDIO_COMMANDS.iter().find(|c| c.id == id)
+}
+
+/// Edit distance between two short strings.
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = Vec::with_capacity(b.len() + 1);
+        cur.push(i + 1);
+        for (j, cb) in b.iter().enumerate() {
+            let sub = prev.get(j).copied().unwrap_or(0) + usize::from(ca != *cb);
+            let del = prev.get(j + 1).copied().unwrap_or(0) + 1;
+            let ins = cur.get(j).copied().unwrap_or(0) + 1;
+            cur.push(sub.min(del).min(ins));
+        }
+        prev = cur;
+    }
+    prev.last().copied().unwrap_or(0)
+}
+
+/// The command id closest to `id` (a misspelling, or the right command in the wrong domain),
+/// when one is close enough to suggest.
+pub fn closest_command(id: &str) -> Option<String> {
+    static IDS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let ids = IDS.get_or_init(|| all().into_iter().map(|c| c.id).collect());
+    let lower = id.to_ascii_lowercase();
+    let cmd = lower.split_once(':').map_or(lower.as_str(), |(_, c)| c);
+    // the same command in another domain (`timeline:comp.new` → `studio:comp.new`)
+    if let Some(other) = ids.iter().find(|i| i.split_once(':').is_some_and(|(_, c)| c.eq_ignore_ascii_case(cmd))) {
+        return Some(other.clone());
+    }
+    // the right name in another group of the same domain (`timeline:timeline.rippleDelete` →
+    // `timeline:edit.rippleDelete`)
+    let domain = lower.split_once(':').map(|(d, _)| d);
+    let last = cmd.rsplit('.').next().unwrap_or(cmd);
+    if last.len() >= 4 {
+        let same: Vec<&String> = ids
+            .iter()
+            .filter(|i| i.split_once(':').is_some_and(|(d, c)| Some(d) == domain && c.rsplit('.').next().is_some_and(|l| l.eq_ignore_ascii_case(last))))
+            .collect();
+        if let [one] = same.as_slice() {
+            return Some((*one).clone());
+        }
+    }
+    let (d, best) = ids.iter().map(|i| (distance(&i.to_ascii_lowercase(), &lower), i)).min_by_key(|(d, _)| *d)?;
+    (d <= 3.max(lower.len() / 6)).then(|| best.clone())
 }
 
 /// Every command, studio first, then each engine's registry.
@@ -253,6 +306,14 @@ mod tests {
         assert_eq!(infer_effect("renderQueue.list", false), Effect::Read);
         assert_eq!(infer_effect("renderQueue.render", true), Effect::FileWrite);
         assert_eq!(infer_effect("sequence.renderBar", false), Effect::Read);
+    }
+
+    #[test]
+    fn misspelled_commands_get_a_suggestion() {
+        assert_eq!(closest_command("timeline:timeline.plcae").as_deref(), Some("timeline:timeline.place"));
+        assert_eq!(closest_command("timeline:comp.new").as_deref(), Some("studio:comp.new"));
+        assert_eq!(closest_command("timeline:timeline.rippleDelete").as_deref(), Some("timeline:edit.rippleDelete"));
+        assert_eq!(closest_command("zzz:qqqqqqqqqqqqqqqqqq"), None);
     }
 
     #[test]

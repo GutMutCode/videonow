@@ -56,6 +56,8 @@ pub struct Studio {
     /// The engines' documents as of the last save, open or new project (unsaved changes = any
     /// difference).
     pub(crate) saved: EngineMarks,
+    /// Answers to requests that carried an id: (request id, command fingerprint, answer).
+    pub(crate) replies: std::collections::VecDeque<(String, String, Value)>,
 }
 
 impl Default for Studio {
@@ -142,6 +144,7 @@ impl Studio {
             last: EngineMarks::default(),
             seen: JournalMarks::default(),
             saved: EngineMarks::default(),
+            replies: std::collections::VecDeque::new(),
         };
         s.last = s.marks();
         s.seen = s.journal_marks();
@@ -237,6 +240,9 @@ impl Studio {
     /// `motion:` commands take an optional `"asset"` (a composition asset) and run on that
     /// composition; `image:` commands need `"asset"` (an image asset).
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
+        if id == "studio:batch" {
+            return self.batch_command(params, &crate::requests::Request::default());
+        }
         // changes made outside commands (an editor, direct engine calls) are accounted for first,
         // so this command's receipt names only what it did
         if self.marks() != self.last {
@@ -252,7 +258,15 @@ impl Studio {
         let rev_before = self.revision;
         let original = params.clone();
         let mut key_check: Option<KeyCheck> = None;
-        let effect = manifest::effect_of(domain, cmd).ok_or_else(|| StudioError::UnknownCommand(id.to_string()))?;
+        let effect = match manifest::effect_of(domain, cmd) {
+            Some(e) => e,
+            None => {
+                return Err(match manifest::closest_command(id) {
+                    Some(suggestion) => StudioError::DidYouMean { id: id.to_string(), suggestion },
+                    None => StudioError::UnknownCommand(id.to_string()),
+                });
+            }
+        };
         if let Some(instead) = manifest::host_command(domain, cmd) {
             return Err(bad(id, format!("in a VideoNow project use {instead}: this command acts on one engine's document only")));
         }
@@ -435,6 +449,18 @@ impl Studio {
         let new_id = self.images.documents().get(i).map(|d| d.doc.id).ok_or(StudioError::NoAsset(id.0))?;
         self.image_docs.insert(id, new_id);
         Ok(i)
+    }
+
+    /// Make a composition asset the motion engine's active composition (what its editor shows
+    /// and what `motion:` commands without an `asset` act on).
+    pub fn open_comp_asset(&mut self, id: AssetId) -> Result<()> {
+        let a = self.assets.get(&id).ok_or(StudioError::NoAsset(id.0))?;
+        let comp = a.comp.ok_or(StudioError::WrongKind(id.0, "a composition"))?;
+        if self.motion.project.comp(MotionItemId(comp)).is_none() {
+            return Err(StudioError::Other(format!("composition {comp} of asset {} was deleted", id.0)));
+        }
+        self.motion.open_comp(MotionItemId(comp));
+        Ok(())
     }
 
     fn asset(&self, cmd: &str, v: Option<&Value>, key: &str, kind: AssetKind) -> Result<Asset> {
@@ -712,6 +738,18 @@ impl Studio {
         let (img, offline) = self.timeline.try_render_program_with_offline_at(scale as f32, Tick::from_seconds_f64(seconds)).map_err(|e| StudioError::Timeline(e.to_string()))?;
         let (w, h) = (u32::try_from(img.w).unwrap_or(0), u32::try_from(img.h).unwrap_or(0));
         Ok((w, h, img.to_rgba8(), offline.into_iter().map(|o| o.name).collect()))
+    }
+
+    /// `frames` stereo frames of an asset's sound from `seconds` (its own time) as the timeline
+    /// hears it, and their peak level. Reads only.
+    pub fn asset_audio(&self, id: AssetId, seconds: f64, frames: usize) -> Result<(usize, f32)> {
+        let a = self.assets.get(&id).ok_or(StudioError::NoAsset(id.0))?;
+        let src = self.timeline.media.resolve_nested(&assets::uri(a.kind, a.id)).ok_or_else(|| StudioError::Other(format!("asset {} cannot be played", id.0)))?;
+        let rate = crate::bridge::COMP_AUDIO_RATE;
+        let start = (seconds.max(0.0) * f64::from(rate)) as i64;
+        let buf = src.audio(start, frames, rate).map_err(|e| StudioError::Timeline(e.to_string()))?;
+        let peak = buf.channels.iter().flatten().fold(0f32, |m, v| m.max(v.abs()));
+        Ok((buf.frames(), peak))
     }
 
     fn inspect(&self) -> Value {

@@ -36,7 +36,7 @@ fn main() {
         }
         Some("mcp") => match mcp_policy(&args[1..]) {
             Err(e) => usage(&e),
-            Ok(policy) => match videonow_automation::serve_stdio(policy) {
+            Ok((policy, log)) => match videonow_automation::serve_stdio(policy, log.as_deref()) {
                 Ok(()) => 0,
                 Err(e) => {
                     eprintln!("videonow mcp: {e}");
@@ -55,15 +55,17 @@ fn main() {
 
 /// `mcp` options: files are confined to the working directory unless `--root` names other
 /// folders or `--allow-anywhere` lifts the confinement; `--deny CLASS` refuses an effect class.
-fn mcp_policy(args: &[String]) -> Result<videonow_core::Policy, String> {
+fn mcp_policy(args: &[String]) -> Result<(videonow_core::Policy, Option<PathBuf>), String> {
     use videonow_core::manifest::Effect;
     let mut roots = Vec::new();
     let (mut anywhere, mut deny) = (false, Vec::new());
+    let mut log = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--root" => roots.push(PathBuf::from(it.next().ok_or("--root needs a folder")?)),
             "--allow-anywhere" => anywhere = true,
+            "--log" => log = Some(PathBuf::from(it.next().ok_or("--log needs a file")?)),
             "--deny" => deny.push(match it.next().map(String::as_str) {
                 Some("destructive") => Effect::Destructive,
                 Some("fileWrite") => Effect::FileWrite,
@@ -83,7 +85,7 @@ fn mcp_policy(args: &[String]) -> Result<videonow_core::Policy, String> {
         videonow_core::Policy::confined_to(&roots)
     };
     p.deny = deny;
-    Ok(p)
+    Ok((p, log))
 }
 
 const HELP: &str = "videonow — one video production project across a timeline, compositions and images
@@ -91,10 +93,12 @@ const HELP: &str = "videonow — one video production project across a timeline,
 USAGE:
   videonow demo [OUT_DIR]       build a demo project and render frames into OUT_DIR (default videonow-demo)
   videonow run SCRIPT.jsonl     run {\"id\": \"domain:command\", \"params\": {...}} lines, one JSON result per line
+                              (optional per line: requestId, expectRevision, dryRun)
   videonow commands [FILTER]    list commands of every engine with their effect class
-  videonow mcp [--root DIR]... [--allow-anywhere] [--deny CLASS]...
+  videonow mcp [--root DIR]... [--allow-anywhere] [--deny CLASS]... [--log FILE]
                               serve MCP on stdio; files stay inside DIR (default: the working
-                              directory); CLASS is destructive, fileWrite, external or edit
+                              directory); CLASS is destructive, fileWrite, external or edit;
+                              --log appends every tool call to FILE (JSON lines)
   videonow mcp --attach [FILE | HOST:PORT --token T]
                               serve MCP on stdio for the project open in VideoNow (the desktop
                               application, with agent access turned on in its Agent panel)
@@ -140,7 +144,12 @@ fn run(path: &Path) -> i32 {
         }
         let r = serde_json::from_str::<Value>(&line).map_err(|e| format!("line {}: {e}", n + 1)).and_then(|v| {
             let id = v["id"].as_str().ok_or_else(|| format!("line {}: missing \"id\"", n + 1))?.to_string();
-            s.execute(&id, v.get("params").cloned().unwrap_or(Value::Null)).map_err(|e| format!("line {}: {e}", n + 1))
+            let req = videonow_core::Request {
+                request_id: v["requestId"].as_str().map(str::to_string),
+                expect_revision: v["expectRevision"].as_u64(),
+                dry_run: v["dryRun"].as_bool().unwrap_or(false),
+            };
+            s.execute_with(&id, v.get("params").cloned().unwrap_or(Value::Null), &req).map_err(|e| format!("line {}: {e}", n + 1))
         });
         let mut o = out.lock();
         match r {

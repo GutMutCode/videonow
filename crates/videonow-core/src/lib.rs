@@ -25,16 +25,24 @@ pub mod project;
 pub mod receipt;
 mod studio;
 mod sync;
+mod requests;
 
 pub use assets::{Asset, AssetId, AssetKind};
 pub use policy::Policy;
 pub use receipt::Receipt;
+pub use requests::Request;
 pub use studio::Studio;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StudioError {
     #[error("unknown command `{0}` (commands are `timeline:…`, `motion:…`, `image:…` or `studio:…`; see `studio:commands`)")]
     UnknownCommand(String),
+    #[error("unknown command `{id}`; did you mean `{suggestion}`? (see `studio:commands`)")]
+    DidYouMean { id: String, suggestion: String },
+    #[error("the project changed since revision {expected} (it is at {actual}): {since}. Look again (doc_inspect, studio:journal) and retry with expect_revision {actual}")]
+    Stale { expected: u64, actual: u64, since: String },
+    #[error("batch step {step} ({id}) failed: {error}; {rolled_back}")]
+    BatchFailed { step: usize, id: String, error: String, rolled_back: String },
     #[error("{cmd}: {msg}")]
     BadParams { cmd: String, msg: String },
     #[error("no asset {0}")]

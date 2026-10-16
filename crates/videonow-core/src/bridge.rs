@@ -75,11 +75,52 @@ pub fn image_for_motion(doc: &photocraft_doc::Document) -> MotionImage {
     MotionImage { width: w, height: h, data }
 }
 
+/// A motion-engine frame (premultiplied, sRGB-encoded float) as the timeline's working format:
+/// premultiplied linear-light float. Values above 1 (overbright text, glows) are kept; the 8-bit
+/// path clipped them.
+pub fn motion_to_linear(img: &MotionImage) -> Vec<f32> {
+    let mut out = Vec::with_capacity(img.data.len() * 4);
+    for p in &img.data {
+        let a = p[3].clamp(0.0, 1.0);
+        if a <= 0.0 {
+            out.extend_from_slice(&[0.0; 4]);
+            continue;
+        }
+        for c in 0..3 {
+            let straight = p[c] / p[3];
+            out.push(filmcraft_color::srgb_to_linear(straight) * a);
+        }
+        out.push(a);
+    }
+    out
+}
+
+/// An image document flattened to the timeline's working format (premultiplied linear float).
+/// 8- and 16-bit documents hold sRGB-encoded values; 32-bit documents are linear already.
+pub fn image_to_linear(doc: &photocraft_doc::Document) -> (u32, u32, Vec<f32>) {
+    let buf = photocraft_compose::flatten(doc);
+    let (w, h) = (buf.rect.width(), buf.rect.height());
+    let linear = doc.depth == photocraft_color::SampleType::F32;
+    let mut out = Vec::with_capacity(buf.px.len() * 4);
+    for p in &buf.px {
+        let a = p[3].clamp(0.0, 1.0);
+        for c in 0..3 {
+            let v = if linear { p[c] } else { filmcraft_color::srgb_to_linear(p[c]) };
+            out.push(v * a);
+        }
+        out.push(a);
+    }
+    (w, h, out)
+}
+
 fn film_rate(r: effectcraft_time::FrameRate) -> FrameRate {
     if r.num > 0 && r.den > 0 { FrameRate::new(r.num, r.den) } else { FrameRate::FPS_30 }
 }
 
-fn video_info(name: &str, kind: MediaKind, codec: &str, w: u32, h: u32, rate: FrameRate, duration: Tick) -> MediaInfo {
+/// Compositions mix their audio at this rate (stereo).
+pub const COMP_AUDIO_RATE: u32 = 48_000;
+
+fn video_info(name: &str, kind: MediaKind, codec: &str, w: u32, h: u32, rate: FrameRate, duration: Tick, audio: bool) -> MediaInfo {
     MediaInfo {
         name: name.to_string(),
         kind,
@@ -90,13 +131,17 @@ fn video_info(name: &str, kind: MediaKind, codec: &str, w: u32, h: u32, rate: Fr
             frame_rate: rate,
             par: (1, 1),
             codec: codec.to_string(),
-            pixel_format: "RGBA 8-bit".into(),
+            pixel_format: "RGBA 32-bit float".into(),
             color: ColorInfo::SRGB_FULL,
             has_alpha: true,
             bitrate: None,
             hdr: None,
         }),
-        audio_streams: vec![],
+        audio_streams: if audio {
+            vec![filmcraft_media::AudioStreamInfo { sample_rate: COMP_AUDIO_RATE, channels: 2, codec: "Composition mix".into(), bits_per_sample: None }]
+        } else {
+            vec![]
+        },
         container: "Studio".into(),
         start_timecode: None,
         file_size: None,
@@ -139,7 +184,8 @@ impl CompMediaSource {
     pub fn new(name: &str, comp: MotionItemId, motion: SharedMotion, generation: Generation, footage: Arc<dyn FootageSource>) -> Option<Self> {
         let snap = read(&motion);
         let c = snap.project.comp(comp)?;
-        let info = video_info(name, MediaKind::Movie, "Composition", c.width, c.height, film_rate(c.frame_rate), Tick(c.duration.0));
+        let audio = effectcraft_render::audio::comp_has_audio(&snap.project, comp);
+        let info = video_info(name, MediaKind::Movie, "Composition", c.width, c.height, film_rate(c.frame_rate), Tick(c.duration.0), audio);
         Some(Self { comp, motion, generation, footage, info, cache: Mutex::new(Frames::default()) })
     }
 }
@@ -166,14 +212,34 @@ impl MediaSource for CompMediaSource {
         let mut r = Renderer::new(&snap.project, self.footage.as_ref(), RenderOpts { scale: f64::from(bucket) / 64.0, ..Default::default() });
         r.expr = Some(&effectcraft_expr::Expressions);
         let img = r.comp_frame(self.comp, effectcraft_time::Tick(t.0));
-        let f = Arc::new(VideoFrame::rgba8(img.width, img.height, img.to_rgba8()).with_pts(t));
+        let f = Arc::new(VideoFrame::rgba_f32(img.width, img.height, motion_to_linear(&img)).with_pts(t));
         self.cache.lock().unwrap_or_else(|e| e.into_inner()).put(key, f.clone());
         Ok(f)
     }
 
-    fn audio(&self, _start: i64, _frames: usize, _sample_rate: u32) -> Result<AudioBuffer, MediaError> {
-        // composition audio joins the timeline mix in a later phase (docs: render pipeline)
-        Err(MediaError::NoStream("audio"))
+    /// The composition's mix (every audible layer with its levels and audio effects), rendered
+    /// by the motion engine from the latest snapshot.
+    fn audio(&self, start: i64, frames: usize, sample_rate: u32) -> Result<AudioBuffer, MediaError> {
+        if self.info.audio_streams.is_empty() {
+            return Err(MediaError::NoStream("audio"));
+        }
+        let rate = sample_rate.max(1);
+        let snap = read(&self.motion);
+        if snap.project.comp(self.comp).is_none() {
+            return Err(MediaError::Offline(format!("{}: the composition was deleted", self.info.name)));
+        }
+        // sample index → comp time (ticks), exact in i128
+        let ticks = (i128::from(start.max(0)) * i128::from(filmcraft_time::TICKS_PER_SECOND) / i128::from(rate)) as i64;
+        let frames = frames.min(rate as usize * 60);
+        let mixed = effectcraft_render::audio::mix_comp(&snap.project, self.footage.as_ref(), Some(&effectcraft_expr::Expressions as &dyn effectcraft_render::ExprHost), self.comp, effectcraft_time::Tick(ticks), frames, rate);
+        let (mut l, mut r) = (Vec::with_capacity(frames), Vec::with_capacity(frames));
+        for s in mixed.chunks_exact(2) {
+            l.push(s[0]);
+            r.push(s[1]);
+        }
+        l.resize(frames, 0.0);
+        r.resize(frames, 0.0);
+        Ok(AudioBuffer { sample_rate: rate, channels: vec![l, r] })
     }
 }
 
@@ -190,7 +256,7 @@ impl ImageMediaSource {
     pub fn new(name: &str, asset: AssetId, images: SharedImages) -> Option<Self> {
         let doc = read(&images).get(&asset)?.doc.clone();
         let b = doc.bounds();
-        let info = video_info(name, MediaKind::Still, "PhotoCraft document", b.width(), b.height(), FrameRate::FPS_30, Tick::from_seconds_f64(5.0));
+        let info = video_info(name, MediaKind::Still, "Image document", b.width(), b.height(), FrameRate::FPS_30, Tick::from_seconds_f64(5.0), false);
         Some(Self { asset, images, info, cache: Mutex::new(Frames::default()) })
     }
 }
@@ -206,8 +272,8 @@ impl MediaSource for ImageMediaSource {
         if let Some(f) = self.cache.lock().unwrap_or_else(|e| e.into_inner()).get(key) {
             return Ok(f);
         }
-        let (w, h, px) = image_rgba8(&snap.doc);
-        let f = Arc::new(VideoFrame::rgba8(w, h, px));
+        let (w, h, px) = image_to_linear(&snap.doc);
+        let f = Arc::new(VideoFrame::rgba_f32(w, h, px));
         self.cache.lock().unwrap_or_else(|e| e.into_inner()).put(key, f.clone());
         Ok(f)
     }

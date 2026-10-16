@@ -2,3 +2,5 @@ target/
 /videonow-demo/
 *.png
 !engines/**/*.png
+!crates/videonow-core/tests/golden/*.png
+!assets/**/*.png

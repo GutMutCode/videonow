@@ -17,7 +17,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::manifest::Effect;
+use crate::manifest::{Effect, is_property_path_parameter};
 
 #[derive(Clone, Debug, Default)]
 pub struct Policy {
@@ -51,7 +51,7 @@ impl Policy {
             return Ok(());
         }
         let mut paths = Vec::new();
-        collect_paths(None, params, &mut paths, 0);
+        collect_paths(cmd, None, params, &mut paths, &mut Vec::new());
         for p in paths {
             let write = effect == Effect::FileWrite;
             let roots: Vec<&PathBuf> = if write { self.write_roots.iter().collect() } else { self.read_roots.iter().chain(&self.write_roots).collect() };
@@ -93,20 +93,33 @@ fn looks_absolute(s: &str) -> bool {
     s.starts_with('/') || s.starts_with('\\') || s.as_bytes().get(1..3) == Some(b":\\") || s.as_bytes().get(1..3) == Some(b":/") || s.starts_with('~')
 }
 
-fn collect_paths(key: Option<&str>, v: &Value, out: &mut Vec<String>, depth: usize) {
-    if depth > 16 {
+fn collect_paths<'value>(command: &str, key: Option<&str>, value: &'value Value, out: &mut Vec<String>, location: &mut Vec<&'value str>) {
+    if location.len() > 16 {
         return;
     }
-    match v {
-        Value::String(s) => {
+    match value {
+        Value::String(text) => {
             let keyed = key.is_some_and(is_path_key);
             // studio:// references name assets of this project, not files
-            if !s.starts_with(crate::assets::SCHEME) && !s.is_empty() && (keyed || looks_absolute(s)) {
-                out.push(s.clone());
+            if !text.starts_with(crate::assets::SCHEME) && !text.is_empty() && !is_property_path_parameter(command, location) && (keyed || looks_absolute(text))
+            {
+                out.push(text.clone());
             }
         }
-        Value::Array(a) => a.iter().for_each(|x| collect_paths(key, x, out, depth + 1)),
-        Value::Object(o) => o.iter().for_each(|(k, x)| collect_paths(Some(k), x, out, depth + 1)),
+        Value::Array(items) => {
+            location.push("*");
+            for item in items {
+                collect_paths(command, key, item, out, location);
+            }
+            location.pop();
+        }
+        Value::Object(fields) => {
+            for (field, item) in fields {
+                location.push(field);
+                collect_paths(command, Some(field), item, out, location);
+                location.pop();
+            }
+        }
         _ => {}
     }
 }
@@ -167,5 +180,30 @@ mod tests {
         let none = Policy::default();
         assert!(none.check("x", Effect::FileWrite, &json!({"path": inside})).is_err());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn property_path_exceptions_are_command_and_location_specific() {
+        let policy = Policy::default();
+        for (command, params) in [
+            ("motion:prop.set", json!({"path": "transform/opacity", "value": 40})),
+            ("motion:prop.get", json!({"path": "transform/opacity"})),
+            ("motion:keys.select", json!({"keys": [{"layer": 1, "path": "transform/opacity", "time": 0}]})),
+            ("motion:prop.pickWhip", json!({"path": "transform/opacity", "target": {"layer": 2, "path": "transform/opacity"}})),
+            ("motion:anim.applyPreset", json!({"preset": {"properties": [{"path": "transform/opacity", "value": 40}]}})),
+        ] {
+            assert!(policy.check(command, Effect::Edit, &params).is_ok(), "{command}: {params}");
+        }
+        for (command, params) in [
+            ("motion:keys.rpfCameraImport", json!({"path": "camera.json"})),
+            ("motion:essential.templateInfo", json!({"path": "template.ectemplate"})),
+            ("motion:anim.applyPreset", json!({"path": "preset.json"})),
+            ("motion:prop.set", json!({"path": "transform/opacity", "value": {"path": "private.json"}})),
+            ("motion:keys.select", json!({"keys": [{"path": "transform/opacity", "file": "private.json"}]})),
+            ("motion:prop.set", json!({"path": "transform/opacity", "value": "/private/file"})),
+            ("motion:prop.unknown", json!({"path": "private.json"})),
+        ] {
+            assert!(policy.check(command, Effect::Edit, &params).is_err(), "{command}: {params}");
+        }
     }
 }

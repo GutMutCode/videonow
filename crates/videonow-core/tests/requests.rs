@@ -107,9 +107,213 @@ fn a_dry_run_reports_and_keeps_nothing() {
     let img = ok(&mut s, "studio:image.new", json!({"name": "I", "width": 16, "height": 16}))["result"]["asset"].clone();
     let rev = s.revision();
     let docs = s.images.documents().len();
-    s.execute_with("image:shape.create", json!({"asset": img, "kind": "rect", "rect": [0, 0, 8, 8], "fill": "#ff0000"}), &Request { dry_run: true, ..Default::default() }).unwrap();
+    s.execute_with(
+        "image:shape.create",
+        json!({"asset": img, "kind": "rect", "rect": [0, 0, 8, 8], "fill": "#ff0000"}),
+        &Request { dry_run: true, ..Default::default() },
+    )
+    .unwrap();
     s.execute_with("studio:image.new", json!({"name": "J"}), &Request { dry_run: true, ..Default::default() }).unwrap();
     assert_eq!((s.revision(), s.images.documents().len(), s.assets().count()), (rev, docs, 2));
+}
+
+fn request_test_dir(name: &str) -> std::path::PathBuf {
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let path = std::env::temp_dir().join(format!("videonow-requests-{name}-{}-{stamp}", std::process::id()));
+    std::fs::create_dir_all(&path).unwrap();
+    path
+}
+
+fn request_state(studio: &mut Studio) -> Value {
+    let inspect = ok(studio, "studio:inspect", json!({}))["result"].clone();
+    json!({"inspect": inspect, "journal": studio.journal()})
+}
+
+fn assert_rollback_rejection(studio: &mut Studio, id: &str, params: Value) {
+    let before = request_state(studio);
+    let error = studio.execute_with(id, params.clone(), &Request { dry_run: true, ..Default::default() }).unwrap_err().to_string();
+    assert!(error.contains("cannot be rolled back"), "{id}: {error}");
+    assert_eq!(request_state(studio), before, "dry run changed state: {id}");
+
+    let steps = vec![("studio:comp.new".into(), json!({"name": "Must not be created", "width": 16, "height": 16})), (id.into(), params)];
+    for (atomic, dry_run) in [(true, false), (true, true), (false, true)] {
+        let error = studio.batch(steps.clone(), atomic, &Request { dry_run, ..Default::default() }).unwrap_err().to_string();
+        assert!(error.contains("step 1") && error.contains("no steps were run"), "{id}: {error}");
+        assert_eq!(request_state(studio), before, "batch changed state: {id}, atomic={atomic}, dry_run={dry_run}");
+    }
+
+    let mut looked = false;
+    let error = studio.preview_with(steps, |_| looked = true).unwrap_err().to_string();
+    assert!(error.contains("step 1") && error.contains("no steps were run"), "{id}: {error}");
+    assert!(!looked, "preview callback ran: {id}");
+    assert_eq!(request_state(studio), before, "preview changed state: {id}");
+}
+
+#[test]
+fn speculative_saves_and_renders_never_create_or_overwrite_files() {
+    let root = request_test_dir("files");
+    let project = root.join("project.videonow");
+    let mut studio = Studio::new();
+    ok(&mut studio, "studio:comp.new", json!({"width": 16, "height": 16}));
+
+    assert_rollback_rejection(&mut studio, "studio:project.save", json!({"path": project}));
+    assert!(!project.exists());
+    assert!(studio.project_path().is_none());
+    assert!(studio.is_dirty());
+
+    ok(&mut studio, "studio:project.save", json!({"path": project}));
+    let files = ["manifest.json", "journal.json", "timeline.fcproj", "motion.ecproj"];
+    let saved: Vec<_> = files.iter().map(|name| std::fs::read(project.join(name)).unwrap()).collect();
+    assert!(!studio.is_dirty());
+    ok(&mut studio, "studio:comp.new", json!({"name": "Unsaved", "width": 16, "height": 16}));
+    assert!(studio.is_dirty());
+    assert_rollback_rejection(&mut studio, "studio:project.save", json!({"path": project}));
+    assert_rollback_rejection(&mut studio, "studio:project.save", json!({}));
+    assert_eq!(studio.project_path(), Some(project.as_path()));
+    assert!(studio.is_dirty());
+    for (name, bytes) in files.iter().zip(saved) {
+        assert_eq!(std::fs::read(project.join(name)).unwrap(), bytes, "{name} was overwritten");
+    }
+
+    let frame = root.join("frame.png");
+    assert_rollback_rejection(&mut studio, "studio:render.frame", json!({"path": frame}));
+    assert!(!frame.exists());
+    std::fs::write(&frame, b"existing output").unwrap();
+    assert_rollback_rejection(&mut studio, "studio:render.frame", json!({"path": frame}));
+    assert_eq!(std::fs::read(&frame).unwrap(), b"existing output");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn speculative_file_writers_are_rejected_before_engine_execution() {
+    let root = request_test_dir("engine-file-writers");
+    let collected = root.join("collected");
+    let fill = root.join("fill");
+    let mut studio = Studio::new();
+    let asset = ok(&mut studio, "studio:comp.new", json!({"width": 16, "height": 16}))["result"]["asset"].clone();
+    assert_rollback_rejection(&mut studio, "motion:file.collectFiles", json!({"folder": collected}));
+    assert!(!collected.exists());
+
+    let layer = ok(&mut studio, "motion:layer.newSolid", json!({"asset": asset, "color": "#ffffff"}))["result"]["layer"].clone();
+    for (id, params) in [
+        ("motion:contentFill.generate", json!({"asset": asset, "layer": layer, "outputDir": fill, "wait": true})),
+        ("motion:layer.newContentAwareFill", json!({"asset": asset, "layer": layer, "outputDir": fill, "wait": true})),
+        ("motion:essential.importTemplate", json!({"path": root.join("input.ectemplate")})),
+        ("motion:file.importLottie", json!({"path": root.join("input.json")})),
+    ] {
+        assert_rollback_rejection(&mut studio, id, params);
+    }
+    assert!(!fill.exists());
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn speculative_operations_reject_nested_dispatch_before_any_step_runs() {
+    let root = request_test_dir("nested");
+    let project = root.join("nested.videonow");
+    let mut studio = Studio::new();
+    ok(&mut studio, "studio:comp.new", json!({"width": 16, "height": 16}));
+    assert_rollback_rejection(&mut studio, "studio:batch", json!({"atomic": false, "steps": [{"id": "studio:project.save", "params": {"path": project}}]}));
+    assert_rollback_rejection(
+        &mut studio,
+        "motion:engine.batch",
+        json!({"asset": 1, "atomic": false, "steps": [{"command": "file.saveAs", "params": {"path": project}}]}),
+    );
+    for id in [
+        "motion:file.runScript",
+        "motion:script.run",
+        "motion:script.runTasks",
+        "motion:window.scriptPanel",
+        "motion:window.restoreScriptPanels",
+        "motion:scriptui.click",
+        "motion:scriptui.set",
+        "motion:scriptui.mouse",
+        "motion:scriptui.close",
+        "image:actions.play",
+        "image:actions.conditional",
+        "image:file.automate.batch",
+        "image:file.automate.createDroplet",
+        "image:file.automate.runDroplet",
+        "image:file.scripts.imageProcessor",
+        "image:file.scripts.scriptEventsManager",
+    ] {
+        let (domain, command) = id.split_once(':').unwrap();
+        assert!(videonow_core::manifest::effect_of(domain, command).is_some(), "missing command: {id}");
+        assert_rollback_rejection(&mut studio, id, json!({}));
+    }
+    assert!(!project.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn speculative_operations_reject_project_replacement_and_history_changes() {
+    let mut studio = Studio::new();
+    ok(&mut studio, "studio:comp.new", json!({"width": 16, "height": 16}));
+    for id in [
+        "studio:project.new",
+        "studio:project.open",
+        "studio:undo",
+        "timeline:edit.undo",
+        "timeline:edit.redo",
+        "motion:edit.undo",
+        "motion:edit.redo",
+        "motion:edit.history",
+        "motion:edit.history.goto",
+        "motion:edit.purgeUndo",
+        "motion:edit.purge",
+        "image:edit.undo",
+        "image:edit.redo",
+        "image:history.undo",
+        "image:history.redo",
+        "image:history.deleteState",
+        "image:history.newDocument",
+        "image:history.newSnapshot",
+        "image:history.selectSnapshot",
+        "image:history.renameSnapshot",
+        "image:history.deleteSnapshot",
+        "image:history.selectState",
+        "image:edit.purge.undo",
+        "image:edit.purge.histories",
+        "image:edit.purge.all",
+        "motion:file.installScript",
+    ] {
+        let (domain, command) = id.split_once(':').unwrap();
+        assert!(videonow_core::manifest::effect_of(domain, command).is_some(), "missing command: {id}");
+        assert_rollback_rejection(&mut studio, id, json!({}));
+    }
+}
+
+#[test]
+fn read_only_history_and_script_queries_remain_available_in_dry_runs() {
+    let mut studio = Studio::new();
+    let before = request_state(&mut studio);
+    for id in ["timeline:history.list", "motion:edit.history.list", "motion:file.scripts.list"] {
+        let result = studio.execute_with(id, json!({}), &Request { dry_run: true, ..Default::default() }).unwrap();
+        assert_eq!(result["receipt"]["dryRun"], true);
+        assert_eq!(result["receipt"]["restored"], true);
+        assert_eq!(request_state(&mut studio), before);
+    }
+}
+
+#[test]
+fn non_atomic_batches_allow_explicit_saves() {
+    let root = request_test_dir("non-atomic");
+    let project = root.join("project.videonow");
+    let mut studio = Studio::new();
+    let result = ok(
+        &mut studio,
+        "studio:batch",
+        json!({"atomic": false, "steps": [
+            {"id": "studio:comp.new", "params": {"width": 16, "height": 16}},
+            {"id": "studio:project.save", "params": {"path": project}}
+        ]}),
+    );
+    assert_eq!(result["completed"], 2);
+    assert!(project.join("manifest.json").is_file());
+    assert_eq!(studio.project_path(), Some(project.as_path()));
+    assert!(!studio.is_dirty());
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 /// A 64×64 sequence with a 64×64 composition holding a solid; returns the solid's layer.
@@ -132,9 +336,8 @@ fn center(s: &Studio) -> [u8; 4] {
 fn a_preview_shows_a_change_and_keeps_nothing() {
     let (mut s, layer) = solid_project("#ff8000");
     let before = center(&s);
-    let (shown, exact) = s
-        .preview_with(vec![("motion:prop.set".into(), json!({"asset": 1, "layer": layer, "path": "transform/opacity", "value": 0}))], |s| center(s))
-        .unwrap();
+    let (shown, exact) =
+        s.preview_with(vec![("motion:prop.set".into(), json!({"asset": 1, "layer": layer, "path": "transform/opacity", "value": 0}))], |s| center(s)).unwrap();
     assert!(exact);
     assert!(shown[0] < 20, "the preview should show the solid gone: {shown:?}");
     assert_eq!(center(&s), before, "the preview kept its change");

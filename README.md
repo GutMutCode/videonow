@@ -76,8 +76,9 @@ claude mcp add videonow-app -- /abs/path/target/release/videonow mcp --attach
 - 모든 명령은 `domain:command` 하나의 표면이고, 효과 분류(read, edit, destructive, fileWrite, external)가 붙어 있습니다.
 - 모르는 매개변수는 거부하고 받는 키를 알려 줍니다. 틀린 명령 이름에는 가장 가까운 명령을 제안합니다.
 - `request_id`로 재시도해도 한 번만 실행됩니다. `expect_revision`이 맞지 않으면(사람이나 다른 에이전트가 그 사이 바꿨으면) 무엇이 바뀌었는지와 함께 거부합니다.
-- `command_batch`는 원자적입니다: 한 단계가 실패하면 앞 단계를 되돌립니다. `"$0.asset"`처럼 앞 단계 결과를 씁니다.
-- `dry_run`과 `render_preview`의 `steps`는 바뀔 내용과 그 그림을 보여 주고 아무것도 남기지 않습니다.
+- `command_batch`는 기본적으로 원자적입니다: 한 단계가 실패하면 앞 단계를 되돌립니다. `"$0.asset"`처럼 앞 단계 결과를 씁니다.
+- `dry_run`, `render_preview`의 `steps`, 원자적 일괄 작업은 복구 가능한 문서 명령만 받습니다. 파일 저장·내보내기, 외부 실행, 프로젝트 교체, 실행 취소·히스토리 변경, 내부 명령을 실행하는 스크립트·배치 등은 어떤 단계도 시작하기 전에 거부합니다. 저장은 편집 결과를 확인한 뒤 별도 명령으로 실행하세요. `atomic:false` 일괄 작업은 앞 단계의 결과를 되돌리지 않습니다.
+- 파일 권한은 저장 위치·기본 출력 경로까지 해석한 뒤 검사합니다. `motion:prop.set`의 `path` 같은 편집 속성 경로는 파일 경로와 구분합니다.
 - `videonow mcp --log FILE`은 모든 도구 호출을 남기고, `videonow-eval score FILE PROJECT`가 그 세션을 채점합니다.
 
 ## 상태

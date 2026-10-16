@@ -116,7 +116,8 @@ pub struct RunParams {
     /// someone may have changed it since you looked.
     #[serde(default)]
     pub expect_revision: Option<u64>,
-    /// Run, report what would change, take it back.
+    /// Preview reversible document changes; file/external effects, project replacement,
+    /// history changes and opaque command wrappers are refused before execution.
     #[serde(default)]
     pub dry_run: Option<bool>,
 }
@@ -135,7 +136,8 @@ pub struct BatchParams {
     /// Steps in order. A string `"$0.asset"` in a step's params is replaced by step 0's
     /// `result.asset` (any path; steps count from 0).
     pub steps: Vec<Step>,
-    /// All or nothing (default true): when a step fails, the steps before it are taken back.
+    /// All or nothing (default true) for reversible document commands. Unsupported operations
+    /// are refused before any step; false allows file/external effects without rollback.
     #[serde(default)]
     pub atomic: Option<bool>,
     #[serde(default)]
@@ -155,8 +157,8 @@ pub struct PreviewParams {
     /// Longest side of the PNG in pixels (default 960, at most the sequence size).
     #[serde(default)]
     pub max_side: Option<u32>,
-    /// Preview a change without keeping it: these steps run, the frame is rendered, and
-    /// everything is taken back.
+    /// Preview reversible document changes without keeping them. File/external effects,
+    /// project replacement, history changes and opaque command wrappers are refused first.
     #[serde(default)]
     pub steps: Option<Vec<Step>>,
 }
@@ -200,7 +202,7 @@ impl StudioMcp {
 
     #[tool(
         title = "Run a command",
-        description = "Run one command: {\"id\":\"studio:comp.new\",\"params\":{\"name\":\"Title\"}}. The reply is {result, receipt}; the receipt lists what changed, the revisions, what was checked and what was not. Optional: request_id (a retry returns the first answer), expect_revision (refused if the project changed since), dry_run (report and take back).",
+        description = "Run one command: {\"id\":\"studio:comp.new\",\"params\":{\"name\":\"Title\"}}. The reply is {result, receipt}; the receipt lists what changed, the revisions, what was checked and what was not. Optional: request_id (a retry returns the first answer), expect_revision (refused if the project changed since), dry_run (report and take back). Dry runs reject file/external effects, project replacement, history changes and opaque command wrappers. Save/export separately after confirming edits.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false)
     )]
     async fn command_run(&self, Parameters(p): Parameters<RunParams>) -> Result<CallToolResult, McpError> {
@@ -216,7 +218,7 @@ impl StudioMcp {
 
     #[tool(
         title = "Run several commands",
-        description = "Run commands in order as one change: {steps: [{id, params?}], atomic?: true}. With atomic (the default) a failing step takes back the ones before it. \"$0.asset\" in a step's params is step 0's result.asset. Optional request_id, expect_revision, dry_run as for command_run. Returns {completed, results, receipt}.",
+        description = "Run commands in order as one change: {steps: [{id, params?}], atomic?: true}. With atomic (the default) a failing step takes back the ones before it. Atomic batches and dry runs reject file/external effects, project replacement, history changes and opaque command wrappers before any step runs. Save/export separately, or use atomic:false without dry_run to allow partial effects. \"$0.asset\" in a step's params is step 0's result.asset. Optional request_id, expect_revision, dry_run as for command_run. Returns {completed, results, receipt}.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false)
     )]
     async fn command_batch(&self, Parameters(p): Parameters<BatchParams>) -> Result<CallToolResult, McpError> {
@@ -249,7 +251,7 @@ impl StudioMcp {
 
     #[tool(
         title = "Render a preview",
-        description = "A PNG of the active sequence at `seconds` (compositions and images on it render live). Reads only; names any offline media drawn as a slate. With `steps`, shows what those commands would do and keeps nothing.",
+        description = "A PNG of the active sequence at `seconds` (compositions and images on it render live). Reads only; names any offline media drawn as a slate. With `steps`, shows reversible document changes and keeps nothing. File/external effects, project replacement, history changes and opaque command wrappers are rejected before any step runs.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn render_preview(&self, Parameters(p): Parameters<PreviewParams>) -> Result<CallToolResult, McpError> {

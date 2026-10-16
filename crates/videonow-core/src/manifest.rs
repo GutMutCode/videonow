@@ -103,10 +103,13 @@ pub fn infer_effect(id: &str, journal: bool) -> Effect {
     if journal { Effect::Edit } else { Effect::Read }
 }
 
-/// Engine commands whose effect the id and journal flag get wrong, found by running every `read`
-/// command on a populated project (`tests/studio.rs`, `read_commands_change_nothing`): they are
-/// not journaled but change the document (view state stored in it, a document timeline).
+/// Engine commands whose document or file effects are not captured by their id and journal flag.
 pub const EFFECT_OVERRIDES: &[(&str, &str, Effect)] = &[
+    ("motion", "file.collectFiles", Effect::FileWrite),
+    ("motion", "contentFill.generate", Effect::FileWrite),
+    ("motion", "layer.newContentAwareFill", Effect::FileWrite),
+    ("motion", "essential.importTemplate", Effect::FileWrite),
+    ("motion", "file.importLottie", Effect::FileWrite),
     ("timeline", "media.toggleProxies", Effect::Edit),
     ("image", "select.isolateLayers", Effect::Edit),
     ("image", "timeline.create", Effect::Edit),
@@ -120,6 +123,43 @@ pub fn engine_effect(domain: &str, id: &str, journal: bool) -> (Effect, &'static
     match EFFECT_OVERRIDES.iter().find(|(d, c, _)| *d == domain && *c == id) {
         Some((_, _, e)) => (*e, "declared"),
         None => (infer_effect(id, journal), "inferred"),
+    }
+}
+
+pub(crate) fn is_property_path_parameter(command: &str, location: &[&str]) -> bool {
+    match location {
+        ["path"] => matches!(
+            command,
+            "motion:prop.get"
+                | "motion:prop.set"
+                | "motion:prop.toggleAnimation"
+                | "motion:prop.addKey"
+                | "motion:prop.toggleKey"
+                | "motion:prop.setExpression"
+                | "motion:prop.reset"
+                | "motion:prop.select"
+                | "motion:prop.deselect"
+                | "motion:prop.convertExpressionToKeyframes"
+                | "motion:prop.pickWhip"
+                | "motion:prop.editGradient"
+                | "motion:keys.paste"
+                | "motion:keys.set"
+                | "motion:keys.setEase"
+                | "motion:keys.setSpatialTangents"
+                | "motion:edit.pasteReversedKeyframes"
+                | "motion:essential.addProperty"
+                | "motion:essential.linkProperty"
+                | "motion:essential.unlinkProperty"
+                | "motion:essential.canAdd"
+                | "motion:effect.editDropdown"
+                | "motion:paths.pointsFollowNulls"
+                | "motion:paths.nullsFollowPoints"
+                | "motion:paths.tracePath"
+        ),
+        ["keys", "*", "path"] => command == "motion:keys.select",
+        ["target", "path"] => command == "motion:prop.pickWhip",
+        ["preset", "properties", "*", "path"] => command == "motion:anim.applyPreset",
+        _ => false,
     }
 }
 
@@ -200,7 +240,7 @@ pub const STUDIO_COMMANDS: &[StudioCommand] = &[
         effect: Effect::Edit,
         params: r#"{"steps":[{"id":str,"params":{…}}],"atomic":bool=true}"#,
         keys: &["steps", "atomic"],
-        summary: "Run several commands as one change: if a step fails the earlier ones are taken back (atomic). A string \"$0.asset\" in a step is replaced by step 0's result.asset. Each step is checked like a command of its own.",
+        summary: "Run several commands as one change: if a step fails the earlier ones are taken back (atomic). Atomic batches reject file/external effects, project replacement, history changes and opaque command wrappers before any step runs. Use separate commands or atomic:false for those operations. A string \"$0.asset\" refers to step 0's result.asset.",
     },
 ];
 

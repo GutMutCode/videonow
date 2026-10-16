@@ -48,6 +48,15 @@ phase's gate checks, and what is not done. Updated with each phase.
 - Requests: `request_id` (a retry returns the first answer), `expect_revision` (a change made
   against an old revision is refused with what changed since), atomic `studio:batch` with
   `$N.path` references, dry runs, `render_preview` with `steps` (look at a change, keep nothing).
+- Dry runs, previews with steps, and atomic batches preflight the whole request and reject
+  file writes, external effects, project replacement, history changes, and opaque command
+  wrappers that cannot be restored by a document checkpoint. Save/export separately after
+  confirming edits, or use an explicitly non-atomic batch when partial effects are intended.
+- Exact document rollback preserves the prior saved/unsaved state despite engine revision
+  counters advancing during undo; incomplete rollback never marks the project saved.
+- The resolved default render path and previous project save path are checked before writing.
+  Command-specific property paths are distinguished from file paths, including nested keyframe,
+  pick-whip, and inline preset properties.
 - Misspelled commands get a suggestion.
 - Golden frames for the demo; a playback budget test.
 

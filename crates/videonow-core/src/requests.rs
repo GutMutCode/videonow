@@ -12,6 +12,9 @@
 //! Taking back uses each engine's own history (`revert_to` on the timeline, undo on the motion
 //! and image engines) and restores the asset table; the receipt says whether the documents are
 //! exactly as before (`restored`).
+//! File writes, external operations, project replacement, history manipulation and opaque
+//! command dispatch are refused before a dry run, preview or atomic batch starts. Run those
+//! operations explicitly, or in a non-atomic batch without a dry run.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -19,6 +22,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::assets::{Asset, AssetId};
+use crate::manifest::{self, Effect};
 use crate::studio::{EngineMarks, Studio};
 use crate::{Result, StudioError};
 
@@ -30,7 +34,7 @@ pub struct Request {
     pub request_id: Option<String>,
     /// Refuse unless the project is at this revision.
     pub expect_revision: Option<u64>,
-    /// Run, report, take back.
+    /// Run, report, take back. Operations outside the document checkpoint are refused first.
     pub dry_run: bool,
 }
 
@@ -53,10 +57,92 @@ pub(crate) struct Checkpoint {
     journal: usize,
     revision: u64,
     last: EngineMarks,
+    was_dirty: bool,
 }
 
 fn fingerprint(id: &str, params: &Value) -> String {
     format!("{id} {params}")
+}
+
+fn check_rollback_command(id: &str) -> Result<()> {
+    let Some((domain, command)) = id.split_once(':') else { return Ok(()) };
+    let reason = if matches!(manifest::effect_of(domain, command), Some(Effect::FileWrite | Effect::External)) {
+        Some("file writes and external operations")
+    } else if matches!(id, "studio:project.open" | "studio:project.new") || manifest::is_host_command(domain, command) {
+        Some("project or document replacement")
+    } else if matches!(
+        id,
+        "studio:undo"
+            | "timeline:edit.undo"
+            | "timeline:edit.redo"
+            | "motion:edit.undo"
+            | "motion:edit.redo"
+            | "motion:edit.history"
+            | "motion:edit.history.goto"
+            | "motion:edit.purgeUndo"
+            | "motion:edit.purge"
+            | "image:edit.undo"
+            | "image:edit.redo"
+            | "image:history.undo"
+            | "image:history.redo"
+            | "image:history.deleteState"
+            | "image:history.newDocument"
+            | "image:history.newSnapshot"
+            | "image:history.selectSnapshot"
+            | "image:history.renameSnapshot"
+            | "image:history.deleteSnapshot"
+            | "image:history.selectState"
+            | "image:edit.purge.undo"
+            | "image:edit.purge.histories"
+            | "image:edit.purge.all"
+    ) {
+        Some("history manipulation")
+    } else if matches!(
+        id,
+        "studio:batch"
+            | "motion:engine.batch"
+            | "motion:file.runScript"
+            | "motion:script.run"
+            | "motion:script.runTasks"
+            | "motion:window.scriptPanel"
+            | "motion:window.restoreScriptPanels"
+            | "motion:scriptui.click"
+            | "motion:scriptui.set"
+            | "motion:scriptui.mouse"
+            | "motion:scriptui.close"
+            | "image:actions.play"
+            | "image:actions.conditional"
+            | "image:file.automate.batch"
+            | "image:file.automate.createDroplet"
+            | "image:file.automate.runDroplet"
+            | "image:file.scripts.imageProcessor"
+            | "image:file.scripts.scriptEventsManager"
+    ) {
+        Some("nested command dispatch and automation")
+    } else {
+        None
+    };
+    match reason {
+        Some(reason) => Err(StudioError::BadParams {
+            cmd: id.to_string(),
+            msg: format!(
+                "{reason} cannot be rolled back by dry runs, previews or atomic batches; run this command explicitly without a dry run, or use atomic:false. Use explicit studio:batch steps instead of nested command dispatch"
+            ),
+        }),
+        None => Ok(()),
+    }
+}
+
+fn check_rollback_steps(steps: &[(String, Value)]) -> Result<()> {
+    for (step, (id, _)) in steps.iter().enumerate() {
+        check_rollback_command(id).map_err(|error| StudioError::BatchFailed {
+            step,
+            id: id.clone(),
+            error: error.to_string(),
+            rolled_back: "no steps were run".into(),
+        })?;
+    }
+    Ok(())
 }
 
 impl Studio {
@@ -75,6 +161,7 @@ impl Studio {
             journal: self.journal.len(),
             revision: self.revision,
             last: self.last.clone(),
+            was_dirty: self.is_dirty(),
         }
     }
 
@@ -168,6 +255,9 @@ impl Studio {
                 self.last = self.marks();
             }
         }
+        if exact && !cp.was_dirty {
+            self.saved = self.marks();
+        }
         exact
     }
 
@@ -229,6 +319,9 @@ impl Studio {
         if id == "studio:batch" {
             return self.batch_command(params, req);
         }
+        if req.dry_run {
+            check_rollback_command(id)?;
+        }
         if let Some(replay) = self.check_request(id, &params, req)? {
             return Ok(replay);
         }
@@ -273,8 +366,12 @@ impl Studio {
 
     /// Run `steps` in order. A string parameter `"$N"` or `"$N.path.to.value"` is replaced by
     /// step N's result (or part of it). `atomic`: when a step fails, the ones before it are taken
-    /// back. Returns `{"completed", "results": [{id, result, receipt}]}`.
+    /// back. Atomic batches and dry runs preflight every step for operations outside the
+    /// document checkpoint. Returns `{"completed", "results": [{id, result, receipt}]}`.
     pub fn batch(&mut self, steps: Vec<(String, Value)>, atomic: bool, req: &Request) -> Result<Value> {
+        if atomic || req.dry_run {
+            check_rollback_steps(&steps)?;
+        }
         let fp_params = json!(steps.iter().map(|(i, p)| json!([i, p])).collect::<Vec<_>>());
         if let Some(replay) = self.check_request("studio:batch", &fp_params, req)? {
             return Ok(replay);
@@ -313,7 +410,11 @@ impl Studio {
             let rolled_back = match cp {
                 Some(cp) => {
                     let exact = self.rollback(cp, false);
-                    if exact { "the steps before it were taken back".to_string() } else { "the steps before it were taken back, but not every document is exactly as before".to_string() }
+                    if exact {
+                        "the steps before it were taken back".to_string()
+                    } else {
+                        "the steps before it were taken back, but not every document is exactly as before".to_string()
+                    }
                 }
                 None => format!("the {step} steps before it stay applied (not atomic)"),
             };
@@ -349,8 +450,10 @@ impl Studio {
     }
 
     /// Run `steps`, call `look` on the result, take everything back: what a change would look
-    /// like (a preview render) without keeping it.
+    /// like (a preview render) without keeping it. Operations outside the document checkpoint
+    /// are refused before any step runs or `look` is called.
     pub fn preview_with<T>(&mut self, steps: Vec<(String, Value)>, look: impl FnOnce(&mut Studio) -> T) -> Result<(T, bool)> {
+        check_rollback_steps(&steps)?;
         if self.marks() != self.last {
             self.sync_editors("external");
         }
@@ -392,7 +495,10 @@ pub(crate) fn substitute(params: &Value, results: &[Value]) -> std::result::Resu
                     _ => &v[part],
                 };
                 if v.is_null() {
-                    return Err(format!("`{s}`: step {n}'s result has no `{part}` (it was {})", results.get(n).map(|r| r["result"].to_string()).unwrap_or_default()));
+                    return Err(format!(
+                        "`{s}`: step {n}'s result has no `{part}` (it was {})",
+                        results.get(n).map(|r| r["result"].to_string()).unwrap_or_default()
+                    ));
                 }
             }
             Ok(v.clone())

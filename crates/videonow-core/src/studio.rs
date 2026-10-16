@@ -679,6 +679,7 @@ impl Studio {
                     return Err(bad(&full, "scale must be in (0, 1] and seconds non-negative"));
                 }
                 let path = str_p("path").unwrap_or("frame.png").to_string();
+                self.policy.check(&full, spec.effect, &json!({"path": path})).map_err(StudioError::Denied)?;
                 let (img, offline) = self.timeline.try_render_program_with_offline_at(scale as f32, Tick::from_seconds_f64(sec)).map_err(|e| StudioError::Timeline(e.to_string()))?;
                 let (w, h) = (u32::try_from(img.w).unwrap_or(0), u32::try_from(img.h).unwrap_or(0));
                 image::save_buffer(&path, &img.to_rgba8(), w, h, image::ColorType::Rgba8).map_err(|e| StudioError::Other(format!("{path}: {e}")))?;
@@ -692,6 +693,8 @@ impl Studio {
                     Some(p) => crate::project::project_dir(p),
                     None => self.project_path.clone().ok_or_else(|| bad(&full, "`path` is needed for a project that was never saved"))?,
                 };
+                let policy_path = path.to_str().ok_or_else(|| bad(&full, "`path` must be valid UTF-8"))?;
+                self.policy.check(&full, spec.effect, &json!({"path": policy_path})).map_err(StudioError::Denied)?;
                 self.save_project(&path)
             }
             "project.open" => {

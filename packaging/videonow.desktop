@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=VideoNow
+GenericName=Video Editor
+Comment=Edit video on a timeline, in motion compositions and in images, in one project
+Exec=videonow-desktop %f
+Icon=videonow
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;Graphics;
+Keywords=video;editor;timeline;motion;compositing;image;
+StartupWMClass=ai.videonow.VideoNow

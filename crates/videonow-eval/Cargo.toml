@@ -1,0 +1,24 @@
+[package]
+name = "videonow-eval"
+description = "Agent evaluation harness: scenarios an AI agent must get through over MCP, with metrics (AI-first design, success criteria)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "videonow-eval"
+path = "src/main.rs"
+
+[dependencies]
+videonow-core = { workspace = true }
+videonow-automation = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "sync", "time", "process"] }
+rmcp = { version = "3.5", default-features = false, features = ["server", "macros", "transport-io"] }
+base64 = "0.22"
+image = { workspace = true }
+
+[lints]
+workspace = true
